@@ -85,6 +85,12 @@ Newest first. `Unreleased` is what is on `main` and not yet tagged.
   the previous release fails to save a newly formed Bot memory until it is replaced; nothing else is
   affected.
 
+### The Bot's screen, opened full size, has a close button
+
+The full-size view of a Bot's screen now has an X in its corner that closes it and goes back to the
+conversation, including while the person has control. Before, Escape was the only way out of a live
+view. Closing does what Escape does: it leaves the wheel where it is.
+
 ### Bots tell you when something needs you
 
 A Bot a person has talked to now checks what that person connected (any app or server they
