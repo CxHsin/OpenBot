@@ -27,9 +27,16 @@ import type { TurnRunner } from "@openbot/toolkit/run-turn";
 import { BOT_PAUSED_REASON, isBotPaused } from "../agents/lifecycle";
 import type { AgentActor } from "../agents/profile-types";
 import type { ChannelStore } from "../channels/routes";
+import { RoutinePreemptedError } from "../scheduling/turns";
 import type { RoutineStore } from "./store";
 
-export type RoutineRunner = { run(routineRunId: string): Promise<void> };
+export type RoutineRunner = {
+  run(
+    routineRunId: string,
+    resume?: boolean,
+    signal?: AbortSignal,
+  ): Promise<void>;
+};
 
 /**
  * How much of a failure's reason the channel notification carries.
@@ -62,10 +69,19 @@ export function createRoutineRunner(options: {
   routineStore: RoutineStore;
   channelStore: ChannelStore;
   runTurn: TurnRunner;
+  aroundTurn?(
+    routineRunId: string,
+    input: Parameters<TurnRunner>[0],
+    run: TurnRunner,
+  ): ReturnType<TurnRunner>;
 }): RoutineRunner {
   const { routineStore, channelStore, runTurn } = options;
 
-  async function runOnce(routineRunId: string): Promise<void> {
+  async function runOnce(
+    routineRunId: string,
+    resume = false,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const context = await routineStore.runContext(routineRunId);
     /*
      * A deleted routine's queued run is nobody's problem. The routine is gone, its runs cascaded
@@ -156,14 +172,22 @@ export function createRoutineRunner(options: {
     async function fire(threadId: string): Promise<void> {
       let replyText: string;
       try {
-        ({ replyText } = await runTurn({
+        const input = {
           ownerUserId,
           routineId,
           agentId,
           threadId,
-          instruction,
-        }));
+          ...(signal ? { signal } : {}),
+          ...(resume ? { runId: crypto.randomUUID() } : {}),
+          instruction: resume
+            ? `Continue the interrupted routine from the completed tool results in this thread. The person's newer instructions take precedence. Do not repeat completed actions. If the recorded outcome of a change is uncertain, stop and ask rather than repeat it. Original task:\n${instruction}`
+            : instruction,
+        };
+        ({ replyText } = await (options.aroundTurn
+          ? options.aroundTurn(routineRunId, input, runTurn)
+          : runTurn(input)));
       } catch (error) {
+        if (error instanceof RoutinePreemptedError) return;
         if (error instanceof HeadlessToolSuspension) {
           await routineStore.finishRun(
             routineRunId,
@@ -223,7 +247,7 @@ export function createRoutineRunner(options: {
   }
 
   return {
-    async run(routineRunId) {
+    async run(routineRunId, resume, signal) {
       /*
        * `run` never throws. Every outcome a routine can have — a gone channel, a refused model, a
        * routine deleted underneath the firing — is recorded on the run row above rather than raised
@@ -232,7 +256,7 @@ export function createRoutineRunner(options: {
        * alternative is a firing that vanishes without a line anywhere.
        */
       try {
-        await runOnce(routineRunId);
+        await runOnce(routineRunId, resume, signal);
       } catch (error) {
         console.error(
           JSON.stringify({

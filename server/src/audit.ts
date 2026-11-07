@@ -75,6 +75,10 @@ export const auditEventTypes = [
   "delivery.sent",
   "delivery.opted_out",
   "delivery.failed",
+  "model.request_completed",
+  "model.request_failed",
+  "turn.preempted",
+  "turn.resumed",
   /**
    * A channel was removed from every member's roster, and by whom.
    *

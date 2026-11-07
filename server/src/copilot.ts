@@ -8,6 +8,7 @@ import type {
 import {
   type CopilotKitIntelligence,
   CopilotRuntime,
+  resolveModel,
 } from "@copilotkit/runtime/v2";
 import { createCopilotHonoHandler } from "@copilotkit/runtime/v2/hono";
 import {
@@ -68,6 +69,7 @@ import {
   type PersonalSkillSources,
 } from "./learning/runtime";
 import type { LearningSettingsStore } from "./learning/settings";
+import { measuredModel, modelMeasurementEnabled } from "./measurement/model";
 import {
   type LoadPersonalMemory,
   PersonalMemoryMiddleware,
@@ -240,6 +242,8 @@ export type RuntimeModel = {
   provider: "openai" | "anthropic";
   defaultModel: string;
   plan?: PlanModelConfig;
+  /** Replay complete Responses inputs for a relay that cannot resolve stored item references. */
+  openaiStateless?: true;
 };
 
 /** Optional desktop environment values may be present but blank; SDKs treat them as URLs. */
@@ -299,6 +303,9 @@ export function runtimeModelForEnvironment(
   return {
     provider,
     plan: planModelForEnvironment(environment),
+    ...(provider === "openai" && environment.OPENBOT_OPENAI_STATELESS === "true"
+      ? { openaiStateless: true as const }
+      : {}),
     defaultModel:
       selectedModelApplies && selectedModel ? selectedModel : defaultModel,
   };
@@ -505,7 +512,26 @@ export function builtInAgentConfiguration(
   ];
 
   return {
-    model: planModel ?? `${model.provider}/${model.defaultModel}`,
+    model: (() => {
+      if (!modelMeasurementEnabled())
+        return planModel ?? `${model.provider}/${model.defaultModel}`;
+      const resolved =
+        planModel ??
+        resolveModel(
+          `${model.provider}/${model.defaultModel}`,
+          apiKey ?? undefined,
+        );
+      return typeof resolved !== "string" &&
+        resolved.specificationVersion === "v3"
+        ? measuredModel(resolved)
+        : resolved;
+    })(),
+    // Some relays accept Responses but cannot resolve item_reference on a tool continuation.
+    // Opt in to complete input replay through the SDK, keeping text, reasoning and call IDs intact.
+    // This is provider storage only; Intelligence still owns the Bot's durable conversation.
+    ...(!planModel && model.provider === "openai" && model.openaiStateless
+      ? { providerOptions: { openai: { store: false } } }
+      : {}),
     /*
      * The package's role, then the person's own standing instructions, then what this Bot actually
      * holds, then the computer.

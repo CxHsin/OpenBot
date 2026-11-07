@@ -26,6 +26,66 @@ const scope = {
   threadId: `${prefix}-thread`,
 };
 const workKeys: string[] = [];
+
+test("a four-second amendment is claimed once with its original and survives as a durable batch", async () => {
+  const ids: string[] = [];
+  for (const [index, text] of [
+    "Look at this post and tell me what to reply.",
+    "Actually, Thursday is fine.",
+    "Another task.",
+  ].entries()) {
+    const offered = await store.offerInbox({
+      ...scope,
+      source: "native",
+      realm: prefix,
+      bindingId: null,
+      externalId: `batch-${index}`,
+      text,
+    });
+    if (!offered.id) throw new Error("No inbox id");
+    ids.push(offered.id);
+    workKeys.push(offered.id);
+    await db
+      .update(deliveryInbox)
+      .set({
+        createdAt: new Date(
+          Date.UTC(2026, 10, 7, 0, 0, index === 0 ? 0 : index === 1 ? 4 : 7),
+        ),
+      })
+      .where(eq(deliveryInbox.id, offered.id));
+  }
+  const [first, second] = await Promise.all([
+    store.startInboxBatch(ids[0]!),
+    store.startInboxBatch(ids[0]!),
+  ]);
+  const batch = first.length ? first : second;
+  expect([first.length, second.length].sort()).toEqual([0, 2]);
+  expect(batch.map((row) => row.text)).toEqual([
+    "Look at this post and tell me what to reply.",
+    "Actually, Thursday is fine.",
+  ]);
+  expect((await store.inbox(ids[2]!))?.state).toBe("queued");
+  const [covered] = await db
+    .select()
+    .from(workItems)
+    .where(
+      and(eq(workItems.kind, "delivery.inbound"), eq(workItems.key, ids[1]!)),
+    );
+  expect(covered?.finishedAt).not.toBeNull();
+  await store.setInboxBatch(
+    ids[0]!,
+    "unknown",
+    "Interrupted execution needs inspection",
+  );
+  expect((await store.inbox(ids[0]!))?.state).toBe("unknown");
+  expect((await store.inbox(ids[1]!))?.state).toBe("unknown");
+  await db.delete(deliveryInbox).where(inArray(deliveryInbox.id, ids));
+  await db
+    .delete(workItems)
+    .where(
+      and(eq(workItems.kind, "delivery.inbound"), inArray(workItems.key, ids)),
+    );
+});
 beforeAll(async () => {
   await db.insert(users).values([
     { id: owner, email: `${owner}@example.test` },

@@ -9,6 +9,7 @@ import { pingHeadline } from "../proactive/ping";
 import type { WorkItem, WorkQueue } from "../work/queue";
 import type { ExpoPushTransport } from "./push";
 import type { DeliveryStore } from "./store";
+import { replyForText } from "./text";
 import {
   type BindingTransport,
   type ChatTransport,
@@ -75,7 +76,8 @@ type RouterStore = Pick<
   | "recordInbox"
   | "setSmsOptOut"
   | "botIdentity"
->;
+> &
+  Partial<Pick<DeliveryStore, "startInboxBatch" | "setInboxBatch">>;
 export function createDeliveryRouter(deps: {
   store: RouterStore;
   queue: Pick<WorkQueue, "claim" | "renew" | "finish" | "release">;
@@ -102,6 +104,7 @@ export function createDeliveryRouter(deps: {
     slack?: TextTransport;
     teams?: TextTransport;
     sms?: TextTransport;
+    telegram?: TextTransport;
     push?: ExpoPushTransport;
   };
   /** The person's routing by kind; defaults to the lifecycle lane's `resolveUpdateRoute`. */
@@ -279,7 +282,7 @@ export function createDeliveryRouter(deps: {
     return null;
   }
   async function receive(input: {
-    source: "sms";
+    source: "sms" | "telegram";
     realm: string;
     identity: string;
     address?: string;
@@ -443,7 +446,7 @@ export function createDeliveryRouter(deps: {
       )
         return;
       if (row.state === "running") {
-        await deps.store.setInbox(
+        await (deps.store.setInboxBatch ?? deps.store.setInbox)(
           row.id,
           "unknown",
           "Previous agent turn stopped after execution began; inspect conversation before retrying.",
@@ -475,7 +478,12 @@ export function createDeliveryRouter(deps: {
           return;
         }
       }
-      await deps.store.setInbox(row.id, "running");
+      const batch = deps.store.startInboxBatch
+        ? await deps.store.startInboxBatch(row.id)
+        : [row];
+      if (!batch.length) return;
+      if (!deps.store.startInboxBatch)
+        await deps.store.setInbox(row.id, "running");
       try {
         const result = await deps.runTurn({
           ownerUserId: row.ownerUserId,
@@ -483,17 +491,18 @@ export function createDeliveryRouter(deps: {
           agentId: row.agentId,
           threadId: row.threadId,
           runId: row.id,
-          text: row.text,
+          text: batch.map((message) => message.text).join("\n\n"),
           signal,
         });
         if (!(await owns())) return;
-        if (result.replyText)
+        const replyText = replyForText(result);
+        if (replyText)
           await notify(row, {
             id: row.id,
-            text: result.replyText,
+            text: replyText,
             kind: "reply",
           });
-        await deps.store.setInbox(row.id, "sent");
+        await (deps.store.setInboxBatch ?? deps.store.setInbox)(row.id, "sent");
         await deps.audit?.({
           ownerUserId: row.ownerUserId,
           channelId: row.channelId,
@@ -503,7 +512,7 @@ export function createDeliveryRouter(deps: {
         });
       } catch (error) {
         if (!(await owns())) return;
-        await deps.store.setInbox(
+        await (deps.store.setInboxBatch ?? deps.store.setInbox)(
           row.id,
           "failed",
           error instanceof DeliveryRefusedError

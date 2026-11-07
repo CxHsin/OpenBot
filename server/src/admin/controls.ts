@@ -728,7 +728,7 @@ type DeliveryLike = {
 };
 
 /**
- * Refuse a Slack or Teams connection for somebody without "Add Bots to Slack and Teams", and put
+ * Refuse a chat connection (including Telegram) without "Add Bots to Slack and Teams", and put
  * every connection and disconnection on the trail. In place, so every holder of the store is covered.
  */
 export function guardDeliveryStore<T extends DeliveryLike>(
@@ -739,7 +739,10 @@ export function guardDeliveryStore<T extends DeliveryLike>(
   const bind = store.bind.bind(store);
   const removeBinding = store.removeBinding.bind(store);
   store.bind = (async (input: Parameters<T["bind"]>[0]) => {
-    const chat = input.transport === "slack" || input.transport === "teams";
+    const chat =
+      input.transport === "slack" ||
+      input.transport === "teams" ||
+      input.transport === "telegram";
     const controls = enterpriseControls();
     if (controls && chat) {
       let allowed = false;
@@ -762,7 +765,7 @@ export function guardDeliveryStore<T extends DeliveryLike>(
         channelId: input.channelId ?? null,
         agentId: input.agentId ?? null,
         /*
-         * Which chat account now speaks as the owner, for Slack and Teams only.
+         * Which chat account now speaks as the owner, including Telegram's private-chat identity.
          *
          * A link code there is redeemed by whoever sends it, and that account then runs the Bot as
          * its owner and decides approvals as them. The row is filed under the owner, so without

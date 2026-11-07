@@ -1,5 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  lte,
+  or,
+  sql,
+} from "drizzle-orm";
 import type { Database } from "../db/client";
 import { agents } from "../db/schema/core";
 import { agentProfiles } from "../db/schema/coworker";
@@ -396,9 +407,138 @@ export function createDeliveryStore(database: Database) {
           .onConflictDoNothing()
           .returning();
         if (!row) return { queued: false };
-        await enqueue(tx, "delivery.inbound", row.id);
+        const coalesce =
+          input.source === "telegram" || input.source === "native";
+        await enqueue(
+          tx,
+          "delivery.inbound",
+          row.id,
+          coalesce ? new Date(row.createdAt.getTime() + 5_000) : undefined,
+        );
         return { queued: true, id: row.id };
       });
+    },
+    /** Claim one fixed five-second window; covered work keys are closed in the same transaction. */
+    async startInboxBatch(id: string) {
+      return database.transaction(async (tx) => {
+        const [initial] = await tx
+          .select()
+          .from(deliveryInbox)
+          .where(eq(deliveryInbox.id, id));
+        if (initial?.state !== "queued") return [];
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${JSON.stringify([initial.ownerUserId, initial.channelId, initial.agentId, initial.threadId, initial.bindingId, initial.source])}, 0))`,
+        );
+        const [current] = await tx
+          .select()
+          .from(deliveryInbox)
+          .where(eq(deliveryInbox.id, id))
+          .for("update");
+        if (current?.state !== "queued") return [];
+        if (initial.source === "telegram" || initial.source === "native") {
+          const [older] = await tx
+            .select({
+              id: deliveryInbox.id,
+              createdAt: deliveryInbox.createdAt,
+            })
+            .from(deliveryInbox)
+            .where(
+              and(
+                eq(deliveryInbox.ownerUserId, initial.ownerUserId),
+                eq(deliveryInbox.channelId, initial.channelId),
+                eq(deliveryInbox.agentId, initial.agentId),
+                eq(deliveryInbox.threadId, initial.threadId),
+                initial.bindingId === null
+                  ? isNull(deliveryInbox.bindingId)
+                  : eq(deliveryInbox.bindingId, initial.bindingId),
+                eq(deliveryInbox.source, initial.source),
+                eq(deliveryInbox.state, "queued"),
+                lte(deliveryInbox.createdAt, initial.createdAt),
+              ),
+            )
+            .orderBy(asc(deliveryInbox.createdAt), asc(deliveryInbox.id))
+            .limit(1);
+          // Its earlier work key remains responsible for the whole window, even if this key was
+          // claimed first on a second replica. Do not run the amendment as a separate turn.
+          if (
+            older &&
+            older.id !== id &&
+            initial.createdAt.getTime() - older.createdAt.getTime() <= 5_000
+          )
+            return [];
+        }
+        const rows =
+          initial.source === "telegram" || initial.source === "native"
+            ? await tx
+                .select()
+                .from(deliveryInbox)
+                .where(
+                  and(
+                    eq(deliveryInbox.ownerUserId, initial.ownerUserId),
+                    eq(deliveryInbox.channelId, initial.channelId),
+                    eq(deliveryInbox.agentId, initial.agentId),
+                    eq(deliveryInbox.threadId, initial.threadId),
+                    initial.bindingId === null
+                      ? isNull(deliveryInbox.bindingId)
+                      : eq(deliveryInbox.bindingId, initial.bindingId),
+                    eq(deliveryInbox.source, initial.source),
+                    eq(deliveryInbox.state, "queued"),
+                    gte(deliveryInbox.createdAt, initial.createdAt),
+                    lte(
+                      deliveryInbox.createdAt,
+                      new Date(initial.createdAt.getTime() + 5_000),
+                    ),
+                  ),
+                )
+                .orderBy(asc(deliveryInbox.createdAt), asc(deliveryInbox.id))
+                .for("update")
+            : [current];
+        const ids = rows.map((row) => row.id);
+        await tx
+          .update(deliveryInbox)
+          .set({ state: "running" })
+          .where(inArray(deliveryInbox.id, ids));
+        await tx
+          .update(workItems)
+          .set({ payload: { inboxIds: ids } })
+          .where(
+            and(eq(workItems.kind, "delivery.inbound"), eq(workItems.key, id)),
+          );
+        const covered = ids.filter((key) => key !== id);
+        if (covered.length)
+          await tx
+            .update(workItems)
+            .set({ finishedAt: sql`now()` })
+            .where(
+              and(
+                eq(workItems.kind, "delivery.inbound"),
+                inArray(workItems.key, covered),
+              ),
+            );
+        return rows;
+      });
+    },
+    async setInboxBatch(
+      id: string,
+      state: DeliveryState,
+      error: string | null = null,
+    ) {
+      const [work] = await database
+        .select({ payload: workItems.payload })
+        .from(workItems)
+        .where(
+          and(eq(workItems.kind, "delivery.inbound"), eq(workItems.key, id)),
+        );
+      const saved = work?.payload.inboxIds;
+      const ids =
+        Array.isArray(saved) &&
+        saved.every((value) => typeof value === "string")
+          ? saved
+          : [id];
+      await database
+        .update(deliveryInbox)
+        .set({ state, error })
+        .where(inArray(deliveryInbox.id, ids));
     },
     async setInbox(
       id: string,

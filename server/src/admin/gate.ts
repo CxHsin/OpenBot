@@ -93,7 +93,7 @@ export const GATED_ROUTES: Rule[] = [
   },
   {
     method: "POST",
-    path: /^\/api\/delivery\/(slack|teams)(\/.*)?$/,
+    path: /^\/api\/delivery\/(slack|teams|telegram)(\/.*)?$/,
     needs: async () => ["slackTeams"],
   },
   {
