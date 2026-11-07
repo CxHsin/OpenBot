@@ -49,5 +49,5 @@ IDs above and the `model.request_completed` rows with that run ID. Local evidenc
 `.logs/p0-notion-source.txt`, `.logs/p0-notion-audit.txt`, `.logs/p0-notion-metrics.txt`,
 `.logs/p0-notion-reply.txt`, and `.logs/p0-closeout-history.txt`.
 
-This uses native ingress and real Telegram output. Eval 000 still requires its own fresh
-Telegram-originated request with usage; this success does not change that requirement.
+This uses native ingress and real Telegram output. Eval 000 separately passed its exact
+Telegram-originated request with same-turn usage; its evidence is recorded in that scenario.

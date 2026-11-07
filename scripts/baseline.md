@@ -26,6 +26,7 @@ Use the same three every time so the numbers are comparable.
 | --- | --- | --- | --- | --- | --- |
 | 1 | First attempt failed; fresh retest passed after repair | unavailable | unavailable | First: engineering repair; retest: 0 | First: 33.378 s incomplete, 792.339 s corrected; retest: 27.071 s complete |
 | 1, measured replay via native API → Telegram | Pass, source titles checked | 58,117 (57,885 input + 232 output) | 55,936 / 57,885 = 96.63% | 0 | 36.225 s |
+| 1, final Telegram → Telegram acceptance | Pass, exact eval 000 input and source titles checked | 110,443 (110,233 input + 210 output) | 81,408 / 110,233 = 73.85% | 0 | 39.468 s |
 | 2, Notion OAuth via native API → Telegram | Pass, fetched metadata and child reference checked | 79,373 (78,875 input + 498 output) | 51,584 / 78,875 = 65.40% | 0 after submission | 39.230 s |
 | 3, native API → Telegram | Pass, saved file read back and source checked | 105,267 (104,211 input + 1,056 output) | 91,392 / 104,211 = 87.70% | 0 | 55.335 s |
 
@@ -103,4 +104,15 @@ or writes. Run `6628e571-603c-4cc9-b447-03f0846c852c` made one fetch and returne
 metadata and scoped description through Telegram message `39`. Original tool output, independent
 gateway read, enforced read audit and outbox state agree (eval 009). Three model requests totalled
 18.499 seconds. All three task types now have measured native-ingress runs with Telegram output;
-the exact Telegram-ingress exit check in eval 000 remains pending.
+the exact Telegram-ingress exit check was still pending at this point.
+
+### Telegram exit acceptance completed
+
+Run `f5cf08c1-81ba-4dca-8f60-960b3fa7ea8d` entered through real Telegram at
+`2026-11-07T14:40:49.801663Z`; Telegram accepted the complete reply as message `41` at
+`14:41:29.270Z`. The browser result, table and delivered text agree on the three titles.
+Four model requests totalled 19.276 seconds; usage and cache totals appear in the table above.
+The model recovered from handback using the snapshot supplied in the refused navigation result,
+then requested navigation again. No manual repair or resend was required. Eval 000 is green;
+P0's exit criterion and all three task types have now passed. This single sample is not a
+sustained latency or success-rate estimate, and historical unknown usage stays unknown.

@@ -263,3 +263,8 @@ API 日志仍报告部分 Intelligence entitlement/memory/personal-skills 不可
 刷新 upstream/main 后发现基点落后 170 个提交，最新引用为 `2560040`，与入口、copilot、
 delivery router、routine runner、subagent 均有重叠。先保存当前验收成果，再独立处理合并；
 本次没有将未验证的上游变动带入运行环境。
+
+随后真实 Telegram 入站验收已完成：run `f5cf08c1-81ba-4dca-8f60-960b3fa7ea8d`
+的浏览器原始结果、表格与完整回信一致，Telegram 消息 `41` 投递成功；四次模型请求共
+110,443 tokens，缓存读取率 73.85%，持久入站到 Telegram 接受耗时 39.468 秒。
+没有人工修复或补发。eval 000 已转绿，P0 退出条件通过；上面的等待记录为此前状态。

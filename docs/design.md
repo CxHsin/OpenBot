@@ -159,8 +159,10 @@ Setup and limits are in `docs/telegram.md`. Real private-chat transport and a fr
 reply have been verified. Built-in API-key headless requests now record provider input/output/cache
 usage and elapsed/first-output time in audit, alongside the existing model-selection ledger. The
 browser/file baseline also passed through authenticated native input and real Telegram output.
-The Notion OAuth task now passes using the owner's connection and read-only grants. A new Telegram-originated input
-with measurement enabled remains pending for the exact eval 000 input; historical usage is unknown.
+The Notion OAuth task passes using the owner's connection and read-only grants. The exact eval 000
+Telegram-originated input also passes with browser results, complete delivery and same-turn usage:
+110,443 tokens and 39.468 seconds from durable receipt to Telegram acceptance. P0's exit criterion
+is green; historical usage remains unknown.
 See evals 007–011 and `scripts/baseline.md` for measured scope and local P1 acceptance.
 
 Each phase has one eval that decides it. A phase is not done until that eval is green.
