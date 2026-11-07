@@ -56,3 +56,12 @@ venv/
 
 # The Recorder extension's signing key never enters the repository (Decision 9).
 extension/**/*.pem
+
+# Secondary-development reference checkouts (DS-Bot, upstream clones), not part of this tree.
+_ref/
+
+# CopilotKit CLI selection belongs to this local checkout.
+.copilotkit/
+
+# Added by CopilotKit CLI: browser snapshots a coding agent writes.
+.playwright-mcp/
