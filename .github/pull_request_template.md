@@ -1,43 +1,29 @@
-## What this changes
+<!-- 填写前阅读 CONTRIBUTING.md → docs/dev/contributing.md；CLI/API 同样适用。删除提示和不适用可选项，不虚构结果。 -->
 
-<!-- What it does, and why it is worth doing. -->
+## 问题
 
-## Where it runs
+<!-- Closes #N / Refs #N，或任务依据；具体问题与用户影响。 -->
 
-OpenBot is deployed as several server processes behind a load balancer, serving a whole company.
-Consecutive requests from the same person reach different processes, and the process that answered a
-WebSocket upgrade is rarely the one that answers the next call on that conversation.
+## 修改
 
-State that outlives a single request therefore has to be shared, or the change works on one machine
-and stops working the moment there are two, without saying so. That failure is worse than not
-shipping the feature: it passes review, passes CI, passes a local demo, and only surfaces as a Bot
-that forgets, a question nobody can answer, or a boundary that never fires.
+<!-- 最终行为、保留的约束；重要决定链接 docs；有依赖时写直接 base/PR。小改动简短写。 -->
 
-Answer these even when the answer is "none":
+## 验证
 
-- [ ] **New state that outlives a request?** Where does it live? A `Map` or `Set` held in a module or
-      a factory closure does not count as somewhere.
-- [ ] **What happens on the second replica?** Name the concrete outcome, not "should be fine".
-- [ ] **Anything serialised?** Say what stops two processes doing it at once. A unique index, a
-      conditional update, or an advisory lock are answers. A check-then-write is not.
-- [ ] **Anything fanned out to a browser?** Say how it reaches a socket held by another process.
-- [ ] **New listener, port, or schedule?** Say how it is reached through the same ingress as the API,
-      and what a hundred copies of it do.
+<!-- 实际命令、退出码/结果、测试/eval 范围；bug 修复前失败、修复后通过。 -->
+<!-- 未运行或环境受限项及原因、后续确认方法；基线对比没跑则注明。界面使用脱敏/合成数据截图。 -->
 
-Postgres is already there and is the default answer to all of the above: a table, a unique index, a
-conditional update, `LISTEN`/`NOTIFY` for fan-out.
+## 状态、并发与部署影响
 
-## Boundary and audit
+<!-- 无运行变化写无。涉及状态时逐项回答： -->
+<!-- 跨请求状态存在哪里？重启后怎样？第二进程具体会怎样，如何避免并发重复？ -->
+<!-- 浏览器更新如何到达其他进程的 socket？新增 listener/端口/schedule 如何启动、到达与防重复？ -->
+<!-- 配置、迁移、状态文件、兼容和恢复影响；仅支持单进程则明确限制。 -->
 
-- [ ] Every acting call still goes through the gateway: resolve, decide, audit, then act.
-- [ ] New refusals and new failures each write a row.
-- [ ] Nothing new is trusted from the client that the server can resolve itself.
+## 边界与审计
+
+<!-- 无相关变化写不适用。动作经网关解析/判断/审计后执行；新增拒绝和失败写行；不信任客户端可由服务端解析的信息。 -->
 
 ## Changelog
 
-- [ ] A line in `CHANGELOG.md` under `Unreleased`, or a sentence on why a deployment behaves no
-      differently afterwards.
-
-## Proof
-
-<!-- What you ran, and what you saw. Screenshots or a recording for anything with a surface. -->
+<!-- 用户可见变化：CHANGELOG.md Unreleased 条目；否则说明为什么部署行为不变。 -->

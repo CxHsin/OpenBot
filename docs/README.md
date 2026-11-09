@@ -1,4 +1,19 @@
-# OpenBot docs
+# nailong-bot docs
+
+## Fork entry
+
+- Planning a feature: [Product](product.md) for value and scope, then [Design](design.md) for system boundaries.
+- Changing code: [Development index](dev/README.md) for the relevant domain, constraints and tests.
+- Understanding an important choice: [Decisions](decisions/README.md). ADRs explain why; current behavior lives in design/domain docs.
+- Choosing the next task: [Plans and specs](dev/plans/README.md).
+- Checking behavior: [Evals](../evals/README.md); logs remain outside docs.
+
+Each detailed fact has one authoritative home. Other documents summarize and link; add, merge or remove
+domain docs as the code evolves. The upstream references below remain applicable where this fork has not changed behavior.
+
+贡献流程与模板见 [贡献入口](../CONTRIBUTING.md)。
+
+## Upstream references
 
 Start with the root [README](../README.md), then use these references:
 

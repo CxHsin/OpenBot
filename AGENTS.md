@@ -10,9 +10,15 @@ A secondary development of [CopilotKit/OpenBot](https://github.com/CopilotKit/op
 proactive personal agent: one that a person can message from anywhere, that works while they are
 away, and that comes back only when it has something worth their attention.
 
-`docs/design.md` is the design and `docs/decisions/` holds the decisions behind it. Read both before
-changing behavior. `docs/` from upstream still describes upstream and stays accurate for everything
-we did not change.
+**Planning behavior:** read [product](docs/product.md) for goals and scope, then
+[design](docs/design.md) and the relevant [decisions](docs/decisions/README.md).
+**Changing code:** use [the development index](docs/dev/README.md) to load the relevant constraints.
+**Verifying:** follow [verification](docs/dev/verification.md). The [docs index](docs/README.md)
+connects these entry points; upstream references remain accurate where we have not changed behavior.
+Repo workflows are in `.agents/skills/`: use `nailong-wayfinding` before an unclear or cross-module
+task, `nailong-implementation` for a confirmed implementation, and `nailong-delivery` for Issues,
+branches, commits, PRs and verification reports. These skills point to the docs above and do not
+replace them.
 
 ## Hard rules
 
@@ -37,7 +43,7 @@ we did not change.
 
 Run from the repository root. Bun 1.4+ and Docker are prerequisites; `scripts/start.sh` needs a bash
 shell (Git Bash or WSL on Windows). For dependency setup, database tests, or a failed Windows test
-run, read `docs/local-development.md` first. It records the verified commands and platform limits.
+run, read `docs/dev/local.md` first. It records the verified commands and platform limits.
 
 ```sh
 bun install
@@ -69,13 +75,17 @@ A change is done when all of these are true, and not before:
 - `bun test` passes for the packages touched, and a bug fix has a test that fails without it.
 - Behavior visible to a person has an entry in `evals/` and that eval moves from red to green, or
   the reason it cannot be an eval is written in the pull request.
-- `docs/design.md` still describes what the code does. A change that contradicts it edits it in the
-  same commit.
+- Design and affected domain docs describe the delivered behavior; update their index and links
+  when adding, merging or removing modules. Keep proposals distinguishable from current behavior.
+
+**Creating or updating Issues/PRs:** read [CONTRIBUTING.md](CONTRIBUTING.md) and the corresponding
+template, including CLI/API use. Shared workflow lives there; verification steps remain in the development guide.
 
 ## How we work with agents
 
 - One task per branch. Nothing runs two agents against the same files at once.
-- Every task starts from a written spec: goal, what is out of scope, and the eval that decides it.
+- Every task starts from a written spec: goal, scope, non-goals, constraints and acceptance.
+  Reuse an existing issue/spec when sufficient; see [plans](docs/dev/plans/README.md).
 - A failure becomes a rule here or an eval in `evals/`, not only a patch. A patch fixes today; the
   rule or the eval is what keeps it fixed.
 - Do not claim a behavior works from a passing model turn. Read the audit row, the database row, or
