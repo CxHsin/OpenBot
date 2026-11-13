@@ -1,10 +1,5 @@
 import { cutAtCodeUnits } from "../channels/text";
 import {
-  callResponsibilityChatTool,
-  isResponsibilityChatTool,
-  RESPONSIBILITY_CHAT_TOOLS,
-} from "../responsibilities/chat-tools";
-import {
   callTriggerTool,
   isTriggerTool,
   TRIGGER_TOOLS,
@@ -241,9 +236,7 @@ type Connection = {
  */
 export async function listTools(): Promise<McpTool[]> {
   // The trigger tools ride this transport so the same catalogue grant governs them.
-  return [...TOOLS, ...TRIGGER_TOOLS, ...RESPONSIBILITY_CHAT_TOOLS].map(
-    (tool) => ({ ...tool }),
-  );
+  return [...TOOLS, ...TRIGGER_TOOLS].map((tool) => ({ ...tool }));
 }
 
 export const listNeedsCredential = false;
@@ -315,8 +308,6 @@ function inWords(summary: RoutineSummary): string {
     `id: ${summary.id}`,
   ];
   if (!summary.enabled) parts.push("switched off");
-  if (summary.responsibilityId)
-    parts.push(`runs responsibility: ${summary.responsibilityId}`);
   return `"${summary.instruction}" — ${parts.join(" · ")}`;
 }
 
@@ -399,24 +390,6 @@ export async function callTool(
       if (error instanceof ResponsibilityNotFoundError)
         return failure(
           "There is no trigger or responsibility of yours with that id for me.",
-        );
-      const message = error instanceof Error ? error.message : String(error);
-      return failure(Array.from(message).slice(0, MAX_RUN_ERROR).join(""));
-    }
-  }
-  if (isResponsibilityChatTool(toolName)) {
-    try {
-      const answer = await callResponsibilityChatTool(
-        ownerUserId,
-        agentId,
-        toolName,
-        args,
-      );
-      return answer.startsWith("Refused.") ? failure(answer) : asResult(answer);
-    } catch (error) {
-      if (error instanceof ResponsibilityNotFoundError)
-        return failure(
-          "There is no responsibility of yours with that id for me.",
         );
       const message = error instanceof Error ? error.message : String(error);
       return failure(Array.from(message).slice(0, MAX_RUN_ERROR).join(""));

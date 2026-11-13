@@ -150,12 +150,7 @@ export type ResponsibilityRunContext = {
   continuation: ResponsibilityContinuation | null;
 };
 export type ResponsibilityRunOutcome =
-  | {
-      status: "succeeded";
-      replyText: string;
-      notify?: boolean;
-      checkpoint?: { summary: string; expectedProgress: string };
-    }
+  | { status: "succeeded"; replyText: string }
   | { status: "waiting"; waiting: HeadlessWaiting; error: string }
   | { status: "failed" | "skipped"; error: string };
 export type ResponsibilityRun = {
@@ -164,7 +159,6 @@ export type ResponsibilityRun = {
   eventId: string;
   status: ResponsibilityRunStatus;
   replyText: string | null;
-  notify?: boolean;
   error: string | null;
   waiting: HeadlessWaiting | null;
   continuation: ResponsibilityContinuation | null;

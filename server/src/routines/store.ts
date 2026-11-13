@@ -44,7 +44,6 @@ import {
   routineSweeps,
   routines,
 } from "../db/schema";
-import { responsibilities } from "../db/schema/responsibilities";
 import { describeCron, nextOccurrence, ScheduleRefusedError } from "./schedule";
 
 const SWEEP_ID = "routines";
@@ -94,7 +93,6 @@ const MAX_NAMED_CHANNELS = 5;
 export type RoutineRunOutcome = "succeeded" | "failed" | "skipped" | "waiting";
 
 export type Routine = {
-  responsibilityId?: string;
   id: string;
   ownerUserId: string;
   agentId: string;
@@ -110,7 +108,6 @@ export type Routine = {
 
 /** One row of the routines page: everything it draws, and nothing it would have to parse. */
 export type RoutineSummary = {
-  responsibilityId?: string;
   id: string;
   agentId: string;
   instruction: string;
@@ -138,7 +135,6 @@ export type RoutineSummary = {
 };
 
 export type RoutineInput = {
-  responsibilityId?: string;
   ownerUserId: string;
   agentId: string;
   channelId?: string;
@@ -155,7 +151,6 @@ export type RoutineInput = {
  * told whose they were would be a runner that could be told the wrong answer.
  */
 export type RoutineRunContext = {
-  responsibilityId?: string;
   routineId: string;
   ownerUserId: string;
   agentId: string;
@@ -287,7 +282,6 @@ type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
 function toRoutine(row: RoutineRow): Routine {
   return {
-    ...(row.responsibilityId ? { responsibilityId: row.responsibilityId } : {}),
     id: row.id,
     ownerUserId: row.ownerUserId,
     agentId: row.agentId,
@@ -355,13 +349,7 @@ function nameThem(candidates: { id: string; name: string }[]): string {
   return [...labels.slice(0, MAX_NAMED_CHANNELS), "and others"].join(", ");
 }
 
-export function createRoutineStore(database: Database): RoutineStore & {
-  conversationFor(
-    ownerUserId: string,
-    agentId: string,
-    channelId?: string,
-  ): Promise<string>;
-} {
+export function createRoutineStore(database: Database): RoutineStore {
   /**
    * Where the reply lands, decided here rather than at the tool boundary.
    *
@@ -505,14 +493,6 @@ export function createRoutineStore(database: Database): RoutineStore & {
     const [row] = await withEnabledCapLock(ownerUserId, async (transaction) => {
       // A waiting update must derive its transition and schedule from the row that now holds the lock.
       const existing = await loadOwned(ownerUserId, id, transaction);
-      if (
-        existing.responsibilityId &&
-        (patch.instruction !== undefined || patch.channelId !== undefined)
-      ) {
-        throw new RoutineRefusedError(
-          "This schedule runs a responsibility. Change its work with update_responsibility; only change the schedule or enabled state here.",
-        );
-      }
 
       const values: Partial<typeof routines.$inferInsert> = {
         updatedAt: new Date(),
@@ -572,7 +552,6 @@ export function createRoutineStore(database: Database): RoutineStore & {
 
   return {
     update,
-    conversationFor: resolveChannel,
 
     async create(input) {
       const instruction = validInstruction(input.instruction);
@@ -589,24 +568,6 @@ export function createRoutineStore(database: Database): RoutineStore & {
       const [row] = await withEnabledCapLock(
         input.ownerUserId,
         async (transaction) => {
-          if (input.responsibilityId) {
-            const [goal] = await transaction
-              .select({ id: responsibilities.id })
-              .from(responsibilities)
-              .where(
-                and(
-                  eq(responsibilities.id, input.responsibilityId),
-                  eq(responsibilities.ownerUserId, input.ownerUserId),
-                  eq(responsibilities.agentId, input.agentId),
-                  eq(responsibilities.channelId, channelId),
-                  eq(responsibilities.status, "active"),
-                ),
-              );
-            if (!goal)
-              throw new RoutineRefusedError(
-                "Choose an active responsibility of yours for this Bot and channel.",
-              );
-          }
           if (
             (await countEnabled(transaction, input.ownerUserId)) >=
             MAX_ENABLED_ROUTINES
@@ -621,7 +582,6 @@ export function createRoutineStore(database: Database): RoutineStore & {
               agentId: input.agentId,
               channelId,
               instruction,
-              responsibilityId: input.responsibilityId,
               cron: input.cron,
               timezone,
               nextRunAt,
@@ -692,9 +652,6 @@ export function createRoutineStore(database: Database): RoutineStore & {
 
       return rows.map(
         ({ routine, channelName, channelDeletedAt, channelExists }) => ({
-          ...(routine.responsibilityId
-            ? { responsibilityId: routine.responsibilityId }
-            : {}),
           id: routine.id,
           agentId: routine.agentId,
           instruction: routine.instruction,
@@ -885,16 +842,13 @@ export function createRoutineStore(database: Database): RoutineStore & {
           agentId: routines.agentId,
           channelId: routines.channelId,
           instruction: routines.instruction,
-          responsibilityId: routines.responsibilityId,
           enabled: routines.enabled,
         })
         .from(routineRuns)
         .innerJoin(routines, eq(routines.id, routineRuns.routineId))
         .where(eq(routineRuns.id, runId))
         .limit(1);
-      if (!row) return null;
-      const { responsibilityId, ...context } = row;
-      return { ...context, ...(responsibilityId ? { responsibilityId } : {}) };
+      return row ?? null;
     },
 
     async routineForFiring(id) {

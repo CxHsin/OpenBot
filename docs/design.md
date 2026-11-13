@@ -44,47 +44,6 @@ Bot, and how its work survives being interrupted.
 
 Reuse the existing mechanisms above before introducing another subsystem.
 
-### Conversation delegation entry
-
-The builtin Routines transport exposes responsibility creation, listing, edits, manual runs and
-pause/resume/complete through existing grants and tool policy. It reuses responsibility tools/store
-and engine; progress reporting remains confined to responsibility runs. Writes are classified in
-the existing catalogue. Creation resolves an explicitly named shared channel or the only shared
-channel using the routine store's membership checks; with several channels it asks which one.
-The transport currently lacks the current conversation ID, so creation does not promise to select
-the current channel automatically. A saved responsibility has no schedule of its own.
-On an existing installation, refresh the Routines tool catalogue and explicitly grant the seven
-conversation responsibility tools to the Bot before using this entry; deploying code does not
-automatically grant new actions. Existing write approval and policy settings still apply.
-Responsibility runs share the existing local conversation scheduling lane, waiting for a person
-turn to release its thread before acquiring the Intelligence lock. They do not preempt routines;
-person turns arriving during a responsibility wait for it. This single-process behavior does not
-provide cross-replica arbitration. See [lock regression](../evals/014-responsibility-conversation-lock.md).
-Verification scope is recorded in [eval 013](../evals/013-conversation-responsibility.md).
-
-`schedule_responsibility` binds an active owned responsibility to an existing routine, using its
-reporting channel and an explicit cron/timezone. It requires its own grant and migration
-`0075_routine_responsibility`. Clock firings enqueue a validated `schedule` event directly into
-the responsibility engine; there is no intermediary model turn or clock acknowledgement.
-The routine run ID is the event dedupe key. Missing, inactive or mismatched targets skip safely.
-Pausing the routine stops future firings; pausing/completing the target also prevents queued work
-from starting. Existing missed-window skipping remains unchanged. This does not yet acquire
-upstream changes, track a Git cursor or suppress no-change reports. See
-[eval 015](../evals/015-scheduled-responsibility.md).
-
-Background responsibility turns also expose `finish_responsibility_check`. It stages progress and
-an explicit notification choice locally to the turn. Successful settlement atomically writes the
-checkpoint and `responsibility_runs.notify`; a progress conflict rejects the stale checkpoint.
-Failure or approval suspension discards the draft. Actionable checks offer their report to existing
-activity/delivery before committing a checkpoint; an offer error leaves the old cursor. This does
-not atomically couple settlement to external delivery: a partial offer or a crash between offering
-and settlement remains uncertain and is not automatically replayed. Quiet checks retain reply text but skip both
-channel activity and delivery. Ordinary turns continue to notify by default. Source cursors are
-stored in existing responsibility progress, not a second tracker. The OpenBot collector in
-`examples/nailong/` runs through computer tools and uses an explicit baseline and committed GitHub
-upstream/fork versions; it does not read the host checkout. Verification is tracked separately in
-[eval 016](../evals/016-upstream-observation.md).
-
 ## Design
 
 ### Triggers

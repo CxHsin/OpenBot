@@ -119,8 +119,6 @@ export const routines = pgTable(
      */
     channelId: text("channel_id").notNull(),
     instruction: text("instruction").notNull(),
-    /** Keep a removed target's id so its schedule skips rather than becoming a normal routine. */
-    responsibilityId: text("responsibility_id"),
     /** Five-field cron. Validated at the tool boundary; never parsed by the client. */
     cron: text("cron").notNull(),
     /** IANA zone the cron is read in. UTC when the person never said otherwise. */

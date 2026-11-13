@@ -24,36 +24,6 @@ const input = {
   runId: "routine-run",
 };
 
-test("a responsibility queued by a person waits for that conversation lock and keeps its initiator", async () => {
-  const entered = latch();
-  const finish = latch();
-  const scheduling = createTurnScheduling({ defer: async () => {} });
-  let locked = false;
-  const person = scheduling.person(input, async () => {
-    locked = true;
-    entered.release();
-    await finish.promise;
-    locked = false;
-    return { replyText: "Queued" };
-  });
-  await entered.promise;
-  let ran = false;
-  const background = scheduling.responsibility(
-    { ...input, initiator: { kind: "responsibility", id: "goal" } },
-    async (turn) => {
-      if (locked) throw new Error("THREAD_LOCK_FAILED");
-      ran = true;
-      expect(turn.initiator).toEqual({ kind: "responsibility", id: "goal" });
-      return { replyText: "Done" };
-    },
-  );
-  await Promise.resolve();
-  expect(ran).toBe(false);
-  finish.release();
-  await person;
-  expect(await background).toEqual({ replyText: "Done" });
-});
-
 test("a person waits for the in-flight tool, then preempts before another model request and leaves a checkpoint", async () => {
   const enteredTool = latch();
   const finishTool = latch();

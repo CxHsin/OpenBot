@@ -23,25 +23,9 @@ P0 已验收；P1 只在已记录的 Telegram/native、单 API 进程范围验�
 
 ## 下一步
 
-2026-11-13 确认以“关注 OpenBot 上游，结合本地差异交付影响分析”为首个产品场景。
-下一项按[上游影响分析 spec](upstream-impact.md)先验证手动发起的一轮完整交付，
-再定义持续观察、处理进度、通知去重与暂停的验收。
-[首轮固定材料报告](../../../evals/fixtures/upstream-impact/report.md)已产出，
-[eval 012](../../../evals/012-upstream-impact.md)仍为 red，待其余验收。
-2026-11-14 已采用普通对话持久委托入口建议，实现与验收见
-[conversation responsibilities](conversation-responsibilities.md)。eval 012 的其他未验收项保留。
-普通对话入口已通过真实 Bot 工具选择、授权审计、数据库生命周期与一次后台执行验收，
-见 [eval 013](../../../evals/013-conversation-responsibility.md) 和
-[eval 014](../../../evals/014-responsibility-conversation-lock.md)。
-[定时唤醒](scheduled-responsibilities.md)已通过真实自然到点验收，见
-[eval 015](../../../evals/015-scheduled-responsibility.md)。
-GitHub-only 持续观察已实现，见 [upstream observation](upstream-observation.md) 和
-[eval 016](../../../evals/016-upstream-observation.md)：真实 Bot 首轮分析与重复检查静默通过，
-每日 Asia/Shanghai 09:00 时间表已启用。离线区间、失败与历史改写由真实 Git fixture 覆盖。
-后续按实际报告决定是否同步候选变化；不自动提交、合并或推送。
-本轮代码审查、已修复问题及原后续路线表见 [review](upstream-observation-review.md)。
-P2 保留为架构待办，按真实委托的中断与恢复要求确定范围，不作为首轮分析的前置项目；
-取消、预算与通用恢复仍需各自验收，阶段表不因此改变完成状态。
+本次[文档基础整理](repo-harness.md)完成后，下一项为 P2 的有界任务 spec：盘点现有任务、队列与历史，
+定义可恢复步骤及不确定副作用处理，确定验收后实现。取消、预算可分后续任务。
+新的“持续盯 source”产品主线尚需具体 source 和任务范围，不在本次文档整理中新增功能。
 基线测量以 [baseline](../../../scripts/baseline.md) 为准，历史运行过程见
 [开发历史](../../local-development.md)。
 

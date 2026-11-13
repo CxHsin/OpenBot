@@ -413,13 +413,6 @@ describe("Routines", () => {
       "pause_trigger",
       "resume_trigger",
       "delete_trigger",
-      "create_responsibility",
-      "update_responsibility",
-      "run_responsibility",
-      "pause_responsibility",
-      "resume_responsibility",
-      "complete_responsibility",
-      "schedule_responsibility",
     ]);
   });
 

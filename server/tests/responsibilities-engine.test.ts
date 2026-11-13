@@ -1,7 +1,5 @@
 import { expect, test } from "bun:test";
 import { HeadlessToolSuspension } from "@openbot/toolkit/headless-tools";
-import { createResponsibilityCheck } from "../src/responsibilities/check";
-import type { ResponsibilityTurnResult } from "../src/responsibilities/engine";
 import { createResponsibilityEngine } from "../src/responsibilities/engine";
 import {
   parseResponsibilityEvent,
@@ -31,8 +29,7 @@ function runContext(): ResponsibilityRunContext {
 function fixture(
   runTurn: (
     input: ResponsibilityRunContext & { signal: AbortSignal },
-  ) => Promise<ResponsibilityTurnResult>,
-  onReply?: (context: ResponsibilityRunContext, text: string) => Promise<void>,
+  ) => Promise<{ replyText: string }>,
 ) {
   const outcomes: ResponsibilityRunOutcome[] = [];
   const finished: string[] = [];
@@ -71,7 +68,6 @@ function fixture(
       },
     },
     runTurn,
-    onReply,
   });
   return { engine, outcomes, finished };
 }
@@ -105,73 +101,6 @@ test("validates finite goals and authenticated normalized event shape", () => {
       subscriptions: [{ source: "github", eventType: "issue.opened" }],
     }).subscriptions,
   ).toHaveLength(1);
-});
-
-test("quiet checks save their successful checkpoint without sending a reply", async () => {
-  const replies: string[] = [];
-  const { engine, outcomes } = fixture(
-    async () => ({
-      replyText: "No new commits.",
-      check: { summary: "cursor: abc", notify: false },
-    }),
-    async (_context, text) => {
-      replies.push(text);
-    },
-  );
-  await engine.dispatch({ owner: "replica-1" });
-  expect(replies).toEqual([]);
-  expect(outcomes).toEqual([
-    {
-      status: "succeeded",
-      replyText: "No new commits.",
-      notify: false,
-      checkpoint: { summary: "cursor: abc", expectedProgress: "" },
-    },
-  ]);
-});
-
-test("a staged checkpoint is discarded when the model turn fails", async () => {
-  const draft = createResponsibilityCheck("goal-1");
-  const { engine, outcomes } = fixture(async () => {
-    await draft.tool.execute({ summary: "cursor: uncommitted", notify: false });
-    throw new Error("Model failed after staging");
-  });
-  await engine.dispatch({ owner: "replica-1" });
-  expect(outcomes).toEqual([
-    { status: "failed", error: "Model failed after staging" },
-  ]);
-});
-
-test("a failed notification offer cannot commit a successful check cursor", async () => {
-  const { engine, outcomes } = fixture(
-    async () => ({
-      replyText: "Important upstream change",
-      check: { summary: "cursor: next-tip", notify: true },
-    }),
-    async () => {
-      throw new Error("Outbox unavailable");
-    },
-  );
-  const report = await engine.dispatch({ owner: "replica-1" });
-  expect(outcomes).toEqual([{ status: "failed", error: "Outbox unavailable" }]);
-  expect(report.succeeded).toEqual([]);
-  expect(report.failed).toEqual([
-    { runId: "run-1", error: "Outbox unavailable" },
-  ]);
-});
-
-test("ordinary and actionable checks still send their reply", async () => {
-  for (const check of [undefined, { summary: "cursor: def", notify: true }]) {
-    const replies: string[] = [];
-    const { engine } = fixture(
-      async () => ({ replyText: "Review this change.", check }),
-      async (_context, text) => {
-        replies.push(text);
-      },
-    );
-    await engine.dispatch({ owner: "replica-1" });
-    expect(replies).toEqual(["Review this change."]);
-  }
 });
 
 test("runs the selected owned Bot once and preserves its progress reply", async () => {

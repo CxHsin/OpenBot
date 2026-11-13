@@ -1,1 +1,0 @@
-ALTER TABLE "responsibility_runs" ADD COLUMN "notify" boolean DEFAULT true NOT NULL;

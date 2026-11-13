@@ -265,14 +265,12 @@ import { createProviderOAuthProxy } from "./provider-oauth";
 import { createRecorderExtension } from "./recorder/wiring";
 import { createRequestActor } from "./request-actor";
 import { createResponsibilityBindingStore } from "./responsibilities/bindings";
-import { useResponsibilityChatTools } from "./responsibilities/chat-tools";
 import {
   createEmailTriggerRoutes,
   createSnsVerifier,
   fetchText as fetchSnsText,
   inboundEmailConfigFromEnv,
 } from "./responsibilities/email";
-import { createScheduledResponsibilityDispatch } from "./responsibilities/scheduled";
 import {
   createSlackTriggerIngest,
   slackAccessFrom,
@@ -1220,12 +1218,6 @@ useTriggerTools({
   publicUrl: config.publicUrl ?? null,
   emailDomain: inboundEmail?.domain ?? null,
 });
-useResponsibilityChatTools({
-  store: responsibilityStore,
-  scheduleRoutine: (input) => routineStore.create(input),
-  engine: { ingest: (event) => responsibilityEngine.ingest(event) },
-  conversationFor: routineStore.conversationFor,
-});
 
 /**
  * Where a Bot handing work to another gets decided.
@@ -1867,11 +1859,6 @@ const routineWork = createRoutineWork({
   personIsActive: turnScheduling.personIsActive,
 });
 const routineRunner = createRoutineRunner({
-  dispatchResponsibility: (context, runId) =>
-    createScheduledResponsibilityDispatch({
-      store: responsibilityStore,
-      engine: responsibilityEngine,
-    })(context, runId),
   routineStore,
   channelStore,
   aroundTurn: (id, input, run) =>
@@ -2020,7 +2007,6 @@ const copilotRuntime = mountCopilotRuntime(
 );
 
 const responsibilityEngine = createServerResponsibilityEngine({
-  scheduleTurn: turnScheduling.responsibility,
   database,
   responsibilityStore,
   routineIntelligence,

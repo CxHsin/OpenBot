@@ -8,21 +8,6 @@ Newest first. `Unreleased` is what is on `main` and not yet tagged.
 
 ## Unreleased
 
-- Background delegations can finish a source check with a checkpoint and an explicit quiet result.
-  Progress saves only when the turn succeeds; quiet runs retain their result without a channel
-  notification. Apply migration `0076_responsibility_quiet`. An OpenBot GitHub upstream/fork collector and
-  setup guide are available in `examples/nailong/`; source access uses existing computer tools.
-
-- Bots granted `schedule_responsibility` can schedule an existing delegation using cron and an
-  explicit timezone. Clock firings directly queue its work without a separate acknowledgement.
-  Pause the routine to stop future firings, or pause/complete the delegation to prevent it starting.
-  Apply migration `0075_routine_responsibility` and refresh the Routines catalogue before use.
-
-- Bots with the corresponding Routines grants can create and manage durable delegations from a
-  conversation, using the existing responsibility store and execution engine. With several shared
-  channels they ask where results should be reported. Delegations run on request or events and do
-  not acquire a schedule automatically.
-
 **Before upgrading.** Twenty things change for an existing deployment:
 - Bots now share one computer per person instead of each having its own. Migration
   `0069_isolated_bots` adds `agent_profiles.isolated`, off for every existing Bot. With the
