@@ -13,14 +13,6 @@ export function countLabel(
   return `${count} ${count === 1 ? one : many}`;
 }
 
-export function accessSummary(skills: number, apps: number): string {
-  const parts = [
-    skills ? countLabel(skills, "skill", "skills", "") : "",
-    apps ? countLabel(apps, "app", "apps", "") : "",
-  ].filter(Boolean);
-  return parts.length ? parts.join(", ") : "Nothing granted";
-}
-
 /**
  * Who else can use it. Publishing and visibility are separate records: a public Bot nobody published
  * is still open to everyone in the deployment.
@@ -37,11 +29,22 @@ export function sharingSummary(
     : "Specific people and groups";
 }
 
-export function setupSummary(agent: {
-  builtIn: boolean;
-  endpoint: string | null;
-}): string {
+/**
+ * Where it runs. The personal edition names what runs it when OpenBot knows: its one person
+ * picked that harness at setup, and the address is the container OpenBot started for it, which
+ * means nothing to them. A team deployment shows the address, which an admin or owner gave it.
+ */
+export function setupSummary(
+  agent: {
+    builtIn: boolean;
+    endpoint: string | null;
+    framework?: string;
+  },
+  edition: "team" | "personal" = "team",
+): string {
   if (agent.builtIn || !agent.endpoint) return "Built in";
+  if (edition === "personal" && agent.framework)
+    return `Runs on ${agent.framework}`;
   try {
     return new URL(agent.endpoint).host;
   } catch {
@@ -63,11 +66,7 @@ export function reachSummary(transports: readonly string[]): string {
   return places.length ? places.join(", ") : "Only in OpenBot";
 }
 
-/** The apps feeding this Bot facts, and whether it checks in on them. */
-export function memorySummary(sources: number, research: boolean): string {
-  const parts = [
-    sources ? countLabel(sources, "source", "sources", "") : "",
-    research ? (sources ? "check-ins on" : "Check-ins on") : "",
-  ].filter(Boolean);
-  return parts.length ? parts.join(", ") : "Nothing connected";
+/** The apps feeding this Bot facts. Its check-ins are routines, counted on the Routines row. */
+export function memorySummary(sources: number): string {
+  return countLabel(sources, "source", "sources", "Nothing connected");
 }

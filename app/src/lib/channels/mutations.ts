@@ -5,6 +5,7 @@ import {
 } from "@tanstack/react-query";
 import { botLifecycleKeys } from "@/lib/bot-lifecycle/queries";
 import { client, tryClient } from "@/lib/client";
+import { settingsKeys } from "@/lib/settings/queries";
 import { type AgentChannel, type ChannelPage, channelKeys } from "./queries";
 
 /**
@@ -23,7 +24,13 @@ export function createChannelMutationOptions(queryClient: QueryClient) {
       return ((await response.json()) as { channel: AgentChannel }).channel;
     },
     onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: channelKeys.all }),
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: channelKeys.all }),
+        // Creating the first starter-Bot conversation claims this person's tour on the server.
+        queryClient.invalidateQueries({
+          queryKey: [...settingsKeys.all, "preferences"],
+        }),
+      ]),
   });
 }
 
@@ -93,6 +100,30 @@ export function setChannelPinnedMutationOptions(queryClient: QueryClient) {
 }
 
 /**
+ * Name a conversation, or clear its name with an empty one so it goes back to its summary.
+ *
+ * Only the person who started it may; the server refuses anybody else, and the roster's `canRename`
+ * is that same answer read ahead of time. The name is the conversation's, for every member.
+ */
+export function renameChannelMutationOptions(queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async (variables: { channelId: string; title: string }) => {
+      await client(`/api/channels/${variables.channelId}/title`, {
+        method: "PUT",
+        body: { title: variables.title.trim() || null },
+        fallback: "Couldn't rename this conversation.",
+      });
+    },
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: channelKeys.list() }),
+        // A search found it by its old name, or would find it by its new one.
+        queryClient.invalidateQueries({ queryKey: channelKeys.searches() }),
+      ]),
+  });
+}
+
+/**
  * Stamp a channel read for this member, patching the cache before the wire answers.
  *
  * Patched in onMutate rather than refetched on success: the dot must clear the instant the channel
@@ -114,49 +145,61 @@ export function markChannelReadMutationOptions(queryClient: QueryClient) {
       queryClient.invalidateQueries({ queryKey: botLifecycleKeys.attention }),
     onMutate: (channelId) => {
       const now = new Date().toISOString();
-      queryClient.setQueryData(
-        channelKeys.list(),
-        (data: InfiniteData<ChannelPage> | undefined) =>
-          data && {
-            ...data,
-            pages: data.pages.map((page) => ({
-              ...page,
-              channels: page.channels.map((row) =>
-                row.id === channelId
-                  ? {
-                      ...row,
-                      /*
-                       * The later of now and the row's own lastMessageAt: lastMessageAt comes from
-                       * another clock, and a marker stamped "now" by a clock running behind it
-                       * would leave the row still reading as unseen — and the dot still lit.
-                       */
-                      lastReadAt:
-                        row.lastMessageAt && row.lastMessageAt > now
-                          ? row.lastMessageAt
-                          : now,
-                    }
-                  : row,
-              ),
-            })),
-          },
+      const markRead = (data: InfiniteData<ChannelPage> | undefined) =>
+        data && {
+          ...data,
+          pages: data.pages.map((page) => ({
+            ...page,
+            channels: page.channels.map((row) =>
+              row.id === channelId
+                ? {
+                    ...row,
+                    /*
+                     * The later of now and the row's own lastMessageAt: lastMessageAt comes from
+                     * another clock, and a marker stamped "now" by a clock running behind it
+                     * would leave the row still reading as unseen — and the dot still lit.
+                     */
+                    lastReadAt:
+                      row.lastMessageAt && row.lastMessageAt > now
+                        ? row.lastMessageAt
+                        : now,
+                  }
+                : row,
+            ),
+          })),
+        };
+      queryClient.setQueryData(channelKeys.list(), markRead);
+      // The same row in any search that holds it, so the dot does not come back there either.
+      queryClient.setQueriesData(
+        { queryKey: channelKeys.searches() },
+        markRead,
       );
     },
   });
 }
 
 /** Soft-delete a channel for everyone in it. The server keeps the transcript; the roster forgets. */
-export function deleteChannelMutationOptions(queryClient: QueryClient) {
+export function deleteChannelMutationOptions(
+  queryClient: QueryClient,
+  discardFailedStart = false,
+) {
   return mutationOptions({
     mutationFn: async (channelId: string) => {
-      await client(`/api/channels/${channelId}`, {
-        method: "DELETE",
-        fallback: "Couldn't delete this conversation.",
-      });
+      await client(
+        `/api/channels/${channelId}${discardFailedStart ? "?discardFailedStart=true" : ""}`,
+        {
+          method: "DELETE",
+          fallback: "Couldn't delete this conversation.",
+        },
+      );
     },
-    // The roster only. The open channel's detail query would refetch into the fresh 404 and
-    // flash an error before the navigate-home lands; left alone, it keeps its cache and the
-    // navigation happens with nothing to complain about.
+    // The roster and its searches only. The open channel's detail query would refetch into the
+    // fresh 404 and flash an error before the navigate-home lands; left alone, it keeps its cache
+    // and the navigation happens with nothing to complain about.
     onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: channelKeys.list() }),
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: channelKeys.list() }),
+        queryClient.invalidateQueries({ queryKey: channelKeys.searches() }),
+      ]),
   });
 }

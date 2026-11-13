@@ -2,6 +2,8 @@ import { IconBuildingBank, IconTrash } from "@tabler/icons-react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useId, useState } from "react";
+import { SignInSection } from "@/components/admin/controls/sign-in-section";
+import { TeamPage } from "@/components/edition/for-a-team";
 import {
   PageEmpty,
   PageRows,
@@ -39,7 +41,7 @@ import { identityProviderListQueryOptions } from "@/lib/identity-providers/queri
 import { queryClient } from "@/query-client";
 
 export const Route = createFileRoute("/_authed/admin/identity-providers")({
-  component: IdentityProvidersPage,
+  component: IdentityProvidersPageInEveryEdition,
 });
 
 const EMPTY = {
@@ -166,6 +168,7 @@ function IdentityProvidersPage() {
           </PageRows>
         )}
       </PageSection>
+      <SignInSection />
 
       <Dialog onOpenChange={setOpen} open={open}>
         <DialogContent>
@@ -331,5 +334,18 @@ function IdentityProvidersPage() {
         </DialogContent>
       </Dialog>
     </PageShell>
+  );
+}
+
+/** The personal edition shows this page's title, and that it applies to a team. */
+function IdentityProvidersPageInEveryEdition() {
+  return (
+    <TeamPage
+      description="Configure your company’s SAML or OpenID Connect provider. Email domains determine which provider people use to sign in."
+      more="Here, nobody signs in."
+      title="Identity providers"
+    >
+      <IdentityProvidersPage />
+    </TeamPage>
   );
 }

@@ -79,6 +79,17 @@ const networkInput = z.strictObject({
   mode: z.enum(["allow_all", "defaults_plus_allowlist", "allowlist_only"]),
   rules: z.array(z.unknown()).max(5_000),
   locked: z.boolean().default(false),
+  /**
+   * Where the list came from when it was not typed: a sentence in plain English that the
+   * deployment's model wrote as the list the admin then saved (admin/network-translate.ts). Recorded
+   * with the save, as a boundary's and a team approval rule's are.
+   */
+  authoring: z
+    .strictObject({
+      source: z.literal("english"),
+      text: z.string().trim().min(1).max(2_000),
+    })
+    .optional(),
 });
 
 const MODEL = z.string().trim().min(1).max(200);
@@ -100,6 +111,7 @@ const settingInputs: {
     servers: z.array(SERVER).max(500),
   }),
   skillSharing: z.boolean(),
+  modelSelection: z.boolean(),
   /*
    * At least one. Stopping check-ins altogether is the Check-ins switch, which tells the people it
    * covers that an admin turned them off; a cap of none would tell them their Bot used its day. At
@@ -120,7 +132,7 @@ export function createEnterpriseAdminRoutes(
 
   const unavailable = (context: Context) =>
     context.json(
-      { error: "Enterprise controls are not running on this server." },
+      { error: "Admin settings aren't available on this server." },
       503,
     );
 
@@ -229,7 +241,14 @@ export function createEnterpriseAdminRoutes(
       targetType: "capability",
       targetId: input.capability,
       actorUserId: context.var.actor.id,
-      payload: { ...input, by: context.var.actor.email },
+      // The permission by its title, so the trail reads which switch without a lookup.
+      payload: {
+        ...input,
+        title: isCapability(input.capability)
+          ? CAPABILITY_LABELS[input.capability].title
+          : input.capability,
+        by: context.var.actor.email,
+      },
     });
     return context.json({ saved: input });
   });
@@ -337,16 +356,21 @@ export function createEnterpriseAdminRoutes(
     );
     if (!parsed.success) {
       return context.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid policy." },
+        {
+          error:
+            parsed.error.issues[0]?.path[0] === "authoring"
+              ? 'authoring must be { source: "english", text } with text of at most 2000 characters.'
+              : (parsed.error.issues[0]?.message ?? "Invalid policy."),
+        },
         400,
       );
     }
     const rules = parseEgressRules(parsed.data.rules);
     if (!rules.ok) return context.json({ error: rules.error }, 400);
+    const { authoring, ...policy } = parsed.data;
     const input = {
-      ...parsed.data,
-      scopeId:
-        parsed.data.scopeKind === "organization" ? "" : parsed.data.scopeId,
+      ...policy,
+      scopeId: policy.scopeKind === "organization" ? "" : policy.scopeId,
       rules: rules.rules,
     };
     if (input.scopeKind === "group" && !input.scopeId) {
@@ -369,6 +393,7 @@ export function createEnterpriseAdminRoutes(
         ruleCount: input.rules.length,
         rules: input.rules,
         by: context.var.actor.email,
+        ...(authoring ? { authoring } : {}),
       },
     });
     return context.json({ saved: input });
@@ -482,7 +507,7 @@ export function createProactiveAdminRoutes(
     const controls = enterpriseControls();
     if (!controls)
       return context.json(
-        { error: "Enterprise controls are not running on this server." },
+        { error: "Admin settings aren't available on this server." },
         503,
       );
     const parsed = parseMetricsDays(context.req.query("days") ?? null);

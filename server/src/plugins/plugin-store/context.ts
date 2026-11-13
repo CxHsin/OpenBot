@@ -1,8 +1,8 @@
 import { connectAppRefusal } from "@openbot/shared/connect-prompt";
+import { researchRoleOf } from "@openbot/shared/research";
 import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { createAuditStore, recordAuditEvent } from "../../audit";
 import { DEV_ACTOR } from "../../auth/dev-actor";
-import type { Database } from "../../db/client";
 import {
   type EntraRefusal,
   EntraTokenRefusedError,
@@ -14,6 +14,7 @@ import {
   decryptSecret,
   encryptSecret,
 } from "../../credentials";
+import type { Database } from "../../db/client";
 import {
   brokeredConnections,
   credentials as credentialRows,
@@ -34,6 +35,15 @@ import {
 import { type Decides, type SchemeKind, schemeKind } from "../broker";
 import { type CatalogueEntry, catalogueEntry } from "../catalogue";
 import { registerDynamicClient } from "../oauth";
+import {
+  accessTokenLive,
+  parseTokenSet,
+  RemoteGrantEndedError,
+  type RemoteOAuthConfig,
+  type RemoteTokenSet,
+  refreshRemoteTokens,
+  serializeTokenSet,
+} from "../remote-oauth";
 import {
   type AccountAnswer,
   type AccountMode,
@@ -202,6 +212,13 @@ export function createStoreContext(options: PluginStoreOptions) {
    */
   async function knownToolRefs(refs: string[]) {
     if (refs.length === 0) return new Set<string>();
+    /*
+     * A research role (`@research/search`, `@research/fetch`) names no server's tool: it stands for
+     * whichever research app a Bot has (see `shared/research.ts`), and the skill editor offers it as
+     * a choice. So it is known by its shape. Without this, every skill that asks for web research,
+     * including ones the Bot proposes, was refused on save.
+     */
+    const roles = refs.filter((ref) => researchRoleOf(ref) !== null);
     // Narrowed in the query to the servers actually named, rather than reading the whole catalogue
     // and filtering here. A deployment aiming at a thousand tools should not scan all of them to
     // check three.
@@ -211,7 +228,7 @@ export function createStoreContext(options: PluginStoreOptions) {
       .from(mcpTools)
       .where(inArray(mcpTools.serverId, servers));
     const known = new Set(rows.map((row) => `${row.serverId}/${row.name}`));
-    return new Set(refs.filter((ref) => known.has(ref)));
+    return new Set([...roles, ...refs.filter((ref) => known.has(ref))]);
   }
 
   /**
@@ -558,6 +575,8 @@ export function createStoreContext(options: PluginStoreOptions) {
        * column is the near-miss that reading replaced. A field kept here for convenience would be
        * the wrong answer sitting in the parameter list of the function that must not use it.
        */
+      /** How a server added by URL signs each person in; see `mcpServers.oauth`. */
+      oauth?: RemoteOAuthConfig | null;
     },
     entry: CatalogueEntry | null,
     actorId: string,
@@ -614,7 +633,7 @@ export function createStoreContext(options: PluginStoreOptions) {
        */
       if (!access.toolkit) {
         throw new PluginInvariantError(
-          `${row.id} resolves to a brokered credential with no ${BROKERED_PROFILE[brokerProvider].vendor} app in its url.`,
+          `${row.id} resolves to a brokered credential with no app in its url.`,
         );
       }
 
@@ -836,6 +855,11 @@ export function createStoreContext(options: PluginStoreOptions) {
           )
         : undefined;
       return { token };
+    }
+
+    // A server added by URL that signs each person in. Its tokens are a set, not a refresh token.
+    if (!entry && row.oauth) {
+      return { token: await remoteAccessTokenFor(row, row.oauth, actorId) };
     }
 
     /*
@@ -1269,6 +1293,110 @@ export function createStoreContext(options: PluginStoreOptions) {
 
     await persistOAuthClient({ serverId, client: fresh, by: "deployment" });
     throw new PluginRefusedError(input.refusal, null);
+  }
+
+  /**
+   * One person's access token for a server added by URL that signs people in.
+   *
+   * The catalogue's vendors hold a refresh token and mint an access token per call. A server added
+   * by URL may never issue a refresh token, so its whole token set is held (`remote-oauth.ts`): the
+   * access token is presented while it lives, and refreshed through the MCP SDK when it does not.
+   * Serialised per person and server, like the catalogue path, so two calls at once refresh once.
+   */
+  async function remoteAccessTokenFor(
+    row: { id: string; title: string },
+    config: RemoteOAuthConfig,
+    actorId: string,
+  ): Promise<string> {
+    const title = row.title;
+    if (!actorId) {
+      throw new PluginRefusedError(
+        `${title} answers as the person asking, and this run is not attributed to anybody.`,
+        null,
+      );
+    }
+    const reconnect = (message: string) =>
+      new PluginRefusedError(
+        connectAppRefusal({
+          serverId: row.id,
+          title,
+          message,
+          reason: "reconnect",
+          at: new Date().toISOString(),
+        }),
+        null,
+      );
+    return await serialized(`${row.id}:${actorId}`, async () => {
+      const [held] = await database
+        .select({ credentialId: mcpUserCredentials.credentialId })
+        .from(mcpUserCredentials)
+        .where(
+          and(
+            eq(mcpUserCredentials.serverId, row.id),
+            eq(mcpUserCredentials.userId, actorId),
+          ),
+        )
+        .limit(1);
+      if (!held) {
+        throw new PluginRefusedError(
+          connectAppRefusal({
+            serverId: row.id,
+            title,
+            message: `You have not connected your ${title} account. Connect it and ask again.`,
+          }),
+          null,
+        );
+      }
+      const [locked] = await database
+        .select({
+          encryptedValue: credentialRows.encryptedValue,
+          revokedAt: credentialRows.revokedAt,
+        })
+        .from(credentialRows)
+        .where(eq(credentialRows.id, held.credentialId))
+        .limit(1);
+      if (!locked || locked.revokedAt) {
+        throw reconnect(
+          `Your ${title} access was withdrawn. Connect it again.`,
+        );
+      }
+      const set = parseTokenSet(
+        await decryptSecret(encryptionKey, locked.encryptedValue),
+      );
+      if (!set) {
+        throw reconnect(
+          `${title} needs connecting again. Reconnect it and ask again.`,
+        );
+      }
+      if (accessTokenLive(set)) return set.accessToken;
+
+      const client = await storedOAuthClient(row.id);
+      if (!client) {
+        throw reconnect(
+          `${title} needs connecting again. Reconnect it and ask again.`,
+        );
+      }
+      let fresh: RemoteTokenSet;
+      try {
+        fresh = await refreshRemoteTokens({ config, client, set });
+      } catch (error) {
+        if (error instanceof RemoteGrantEndedError) {
+          await credentials.revoke(held.credentialId);
+          throw reconnect(
+            `Your ${title} sign-in has ended, so this wasn't done. Reconnect it and ask again.`,
+          );
+        }
+        throw new PluginRefusedError(
+          `Couldn't reach ${title} to renew your sign-in. Try again in a moment.`,
+          null,
+        );
+      }
+      await rotateConnectionToken({
+        credentialId: held.credentialId,
+        refreshToken: serializeTokenSet(fresh),
+      });
+      return fresh.accessToken;
+    });
   }
 
   /**
@@ -1757,7 +1885,7 @@ export function createStoreContext(options: PluginStoreOptions) {
     if (!existing) return;
     if (accessFor(existing, null).credential !== "brokered") return;
     throw new CustomServerRefusedError(
-      `${serverId} is ${brokerProvider === "arcade" ? "an" : "a"} ${BROKERED_PROFILE[brokerProvider].vendor} app this deployment has enabled, and people may have connected their accounts to it. Remove the app first — which ends those accounts at ${BROKERED_PROFILE[brokerProvider].vendor} — and the name is then free.`,
+      `${serverId} is an app people connect through OpenBot, and people may have connected their accounts to it. Remove the app first, which ends those accounts, and the name is then free.`,
     );
   }
 

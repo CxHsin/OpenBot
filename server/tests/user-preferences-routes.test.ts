@@ -10,6 +10,7 @@ import { userPreferencesRoutes } from "../src/user-preferences-routes";
 function fixture() {
   const state = new Map<string, UserPreferences>();
   const store: UserPreferencesStore = {
+    claimStarterTour: async () => {},
     read: async (id) => state.get(id) ?? DEFAULT_USER_PREFERENCES,
     patch: async (id, patch) => {
       const saved = { ...DEFAULT_USER_PREFERENCES, ...state.get(id), ...patch };
@@ -97,6 +98,10 @@ test.each([
   { proactive: "sometimes" },
   { proactive: true },
   { proactive: null },
+  { starterTourDismissed: true },
+  { starterTourDismissed: false },
+  { starterTourDismissed: null },
+  { starterTourChannelId: "replacement" },
 ])("rejects invalid or extra preference fields: %j", async (body) => {
   const { appFor, state } = fixture();
   expect((await appFor("alice").request(path, patch(body))).status).toBe(400);
@@ -217,8 +222,27 @@ test("a skin OpenBot does not ship is refused with the skins it does", async () 
   );
   expect(refused.status).toBe(400);
   expect(((await refused.json()) as { error: string }).error).toContain(
-    "openbot, openduet, opendots, openmuse",
+    "openbot, openduet, opendots, openfuse",
   );
+});
+
+test("a tab opened before OpenMuse was renamed still saves it, under OpenFuse's id", async () => {
+  const { appFor } = fixture();
+  const saved = await appFor("alice").request(
+    path,
+    patch({ skin: "openmuse" }),
+  );
+  expect(saved.status).toBe(200);
+  expect(
+    ((await saved.json()) as { preferences: UserPreferences }).preferences.skin,
+  ).toBe("openfuse");
+  expect(
+    (
+      (await (await appFor("alice").request(path)).json()) as {
+        preferences: UserPreferences;
+      }
+    ).preferences.skin,
+  ).toBe("openfuse");
 });
 
 test("check-ins start on, and a person's off is kept without touching the others", async () => {

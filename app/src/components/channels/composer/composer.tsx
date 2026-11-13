@@ -19,6 +19,7 @@ import {
   type ChangeEvent,
   type DragEvent,
   type FormEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -27,8 +28,8 @@ import {
 } from "react";
 import { attachmentModality } from "@/components/channels/chat-messages";
 import { IconWaveform } from "@/components/icons/waveform";
+import { RoutineComposerButton } from "@/components/routines/new-routine-button";
 import {
-  attachmentUrl,
   classifyAttachment,
   MAX_ATTACHMENTS_PER_MESSAGE,
   mayBeTruncatedForModel,
@@ -41,10 +42,16 @@ import { Button } from "../../ui/button";
 import { AttachmentStrip } from "./attachment-strip";
 import {
   attachmentsConfigFor,
+  discardStagedAttachment,
   FILE_PICKER_ACCEPT,
+  heldAttachmentsConfig,
   stagedRowId,
 } from "./attachments";
-import { DictationButton, DictationSurface } from "./dictation-controls";
+import {
+  DictationButton,
+  DictationSurface,
+  LiveDictationNotice,
+} from "./dictation-controls";
 import { appendDictation } from "./dictation-draft";
 import {
   applyCommandChips,
@@ -56,9 +63,11 @@ import {
 } from "./draft";
 import { screenPickedFiles } from "./picked-files";
 import { type RejectedFile, RejectedFiles } from "./rejected-files";
-import { PLACEHOLDER_COMMANDS } from "./sources";
 import { type AgentOption, buildTriggers } from "./triggers";
 import { useDictation } from "./use-dictation";
+
+/** One shared empty list, so a box with no commands does not rebuild its triggers per render. */
+const NO_COMMANDS: readonly CommandOption[] = [];
 
 /**
  * The SDK's upload failure, derived rather than imported for the reason `attachments.ts` records
@@ -83,6 +92,7 @@ type UploadFailure = Parameters<
  * the files. It is read off the queue ACTION instead, by `conversation-view.tsx`, which is the one
  * place that has both halves in hand.
  */
+
 export type DroppedAttachmentCause =
   /** Several parked messages became one turn, and the joined message overran the per-message cap. */
   | "merged-over-cap"
@@ -115,10 +125,11 @@ function stagedModality(attachment: Attachment) {
 
 const MAX_HEIGHT_PX = 220;
 /**
- * Tracks the compact `text-sm` line box so PromptArea stays vertically centered in one row.
+ * Two `text-sm` lines: the compact composer's message box sits on its own row above the controls,
+ * so it opens two lines tall and grows from there.
  */
-const COMPACT_MIN_HEIGHT_PX = 19;
-const COMPACT_MAX_HEIGHT_PX = 96;
+const COMPACT_MIN_HEIGHT_PX = 38;
+const COMPACT_MAX_HEIGHT_PX = 160;
 
 export type ComposerProps = {
   className?: string;
@@ -130,8 +141,14 @@ export type ComposerProps = {
   editorClassName?: string;
   compact?: boolean;
   voiceCall?: { active: boolean; supported: boolean; onStart(): void };
+  /**
+   * The model picker, drawn beside the microphone. Built by the screen, which knows the Bot and the
+   * conversation; the composer only gives it a place. Absent draws nothing.
+   */
+  modelPicker?: ReactNode;
   /** Agents that `@` can address. Empty means the mention menu reports an empty channel. */
   agents?: readonly AgentOption[];
+  /** What `/` offers: the skills of the Bot this box sends to. Empty offers nothing. */
   commands?: readonly CommandOption[];
   /**
    * Receives the whole draft rather than a string, so a mention or a command reaches the caller as
@@ -161,6 +178,12 @@ export type ComposerProps = {
    */
   disabled?: boolean;
   /**
+   * The message can be written but has nowhere to go yet: a new conversation with nobody in To:.
+   * Enter and Send call this instead of sending and leave the words in the box, so the caller can
+   * say what is missing. Unlike `disabled`, it does not stop anybody writing.
+   */
+  onSendHeld?: () => void;
+  /**
    * A turn is in flight. It gates sending, not writing: a channel is `pending` while it is still
    * connecting and restoring its history, and the composer is on screen throughout.
    */
@@ -177,17 +200,30 @@ export type ComposerProps = {
    */
   autoFocus?: boolean;
   /**
-   * The channel a picked file is uploaded to, and the one switch for the whole attachment feature.
+   * The channel a picked file is uploaded to. With it, every file is uploaded the moment it is
+   * picked, and the draft carries stored attachments.
    *
-   * WITH NO `channelId` THIS COMPOSER BEHAVES EXACTLY AS IT DID BEFORE ATTACHMENTS EXISTED, which
-   * is what keeps `/channel/new`, the home screen and the onboarding poster working untouched. No
-   * config reaches `useAttachments`, so it installs no paste listener at all; the form takes no
-   * drag handlers, no file input is rendered, and the `+` button goes on saying it has nothing to
-   * offer. That is the right answer rather than a degraded one for a screen with nowhere to put an
-   * upload: the compose screen creates its channel on send, so a file staged there would belong to
-   * a channel that does not exist yet.
+   * WITH NEITHER THIS NOR `holdsFilesUntilSent`, THIS COMPOSER TAKES NO FILES: no config reaches
+   * `useAttachments`, so it installs no paste listener, no file input is rendered, the `+` button
+   * says it has nothing to offer, and a drop is refused with a sentence. That is the onboarding
+   * poster, the start placeholder and a group conversation.
    */
   channelId?: string;
+  /**
+   * For a screen whose conversation is created by its first message: `/channel/new` and the home
+   * screen. Picked, pasted and dropped files are held in this tab and shown on the strip exactly as
+   * in a conversation, and `onSubmit` receives them on the draft with nothing uploaded yet. The
+   * caller creates the conversation and sends them with `uploadHeldFiles` before the first message
+   * goes. See `heldAttachmentsConfig` for why the files wait instead of the conversation being
+   * created at the first pick. Ignored when there is a `channelId`.
+   */
+  holdsFilesUntilSent?: boolean;
+  /**
+   * Files to put back on the strip when this composer mounts, as `initialValue` puts words back:
+   * the home screen restoring a first message whose start failed after it had navigated away.
+   * Screened like any other pick. Read once.
+   */
+  initialFiles?: readonly File[];
   /**
    * There is a run on the wire for Stop to reach.
    *
@@ -243,6 +279,12 @@ export type ComposerProps = {
    * that can sum this; a caller with no queue leaves it out and nothing changes.
    */
   queuedAttachmentCount?: number;
+  /**
+   * The Bot this box sends to and the conversation it is in, for the clock beside `+` that sets up
+   * a routine for them. Absent draws no clock: a box with no conversation yet has nowhere for a
+   * routine to post. Drawn by the compact layout, the one a conversation uses.
+   */
+  routine?: { agentId: string; channelId: string };
 };
 
 /**
@@ -309,25 +351,37 @@ const UNACCEPTED_DROP_REASON = {
     "first, then attach files in the conversation it starts.",
 } as const;
 
+/**
+ * A drop that announced files and delivered none (see `handleDrop`). The `+` button reads the file
+ * through the system's own picker, so it is the next step that works.
+ */
+const UNREADABLE_DROP_REASON =
+  "couldn't be attached. Attach it with + instead.";
+
 export function Composer({
   className,
   editorClassName,
   compact = false,
   voiceCall,
+  modelPicker,
   agents = [],
-  commands = PLACEHOLDER_COMMANDS,
+  commands = NO_COMMANDS,
   onSubmit,
   onQueue,
   onStop,
   disabled = false,
+  onSendHeld,
   pending = false,
   autoFocus = false,
   channelId,
+  holdsFilesUntilSent = false,
+  initialFiles,
   stoppable,
   initialValue,
   droppedAttachments,
   // Nothing parked is the right answer for every caller without a queue, which is most of them.
   queuedAttachmentCount = 0,
+  routine,
 }: ComposerProps) {
   const [value, setValue] = useState<Segment[]>(
     initialValue ? [{ type: "text", text: initialValue }] : [],
@@ -352,11 +406,24 @@ export function Composer({
   /** A send has completed and the caret is owed back, as soon as the editor will take it. */
   const wantsFocus = useRef(false);
   const sendDictatedDraft = useRef(false);
+  /** The box as it is now, for live dictation to add its words to. */
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  /** The box as it was when live dictation began: each transcript replaces what came after it. */
+  const liveBase = useRef<Segment[]>([]);
   const dictation = useDictation(
-    (transcript, intent) => {
-      setValue((current) => appendDictation(current, transcript));
-      sendDictatedDraft.current = intent === "send";
-      wantsFocus.current = true;
+    {
+      onTranscript: (transcript, intent) => {
+        setValue((current) => appendDictation(current, transcript));
+        sendDictatedDraft.current = intent === "send";
+        wantsFocus.current = true;
+      },
+      onLiveStart: () => {
+        liveBase.current = valueRef.current;
+      },
+      onLiveText: (transcript) => {
+        setValue(appendDictation(liveBase.current, transcript));
+      },
     },
     disabled || voiceCall?.active === true,
   );
@@ -455,6 +522,16 @@ export function Composer({
     }
   }, []);
 
+  /**
+   * The object URLs a held composer made for its chips' previews, revoked once the chip is gone.
+   * A ref for the reason `uploadedRows` is one: nothing is drawn from it.
+   */
+  const heldPreviews = useRef<Set<string>>(new Set());
+
+  const recordHeld = useCallback((previewUrl: string) => {
+    heldPreviews.current.add(previewUrl);
+  }, []);
+
   const attachmentsConfig = useMemo(
     () =>
       channelId
@@ -464,8 +541,17 @@ export function Composer({
             recordRejection,
             recordUpload,
           )
-        : undefined,
-    [channelId, uploadGroup, recordRejection, recordUpload],
+        : holdsFilesUntilSent
+          ? heldAttachmentsConfig(recordRejection, recordHeld)
+          : undefined,
+    [
+      channelId,
+      holdsFilesUntilSent,
+      uploadGroup,
+      recordRejection,
+      recordUpload,
+      recordHeld,
+    ],
   );
 
   /**
@@ -633,9 +719,43 @@ export function Composer({
         continue;
       }
       uploadedRows.current.delete(rowId);
-      discardStagedAttachment(rowId);
+      void discardStagedAttachment(rowId);
     }
   }, [attachments]);
+
+  /*
+   * A held chip's preview is released once the chip is gone: removed by hand, or sent. Gated on
+   * nothing uploading for the reason the reconciler above is: the URL exists a moment before the
+   * SDK writes it onto its placeholder, and revoking it in that window would blank a live preview.
+   */
+  useEffect(() => {
+    if (heldPreviews.current.size === 0) {
+      return;
+    }
+    if (attachments.some((attachment) => attachment.status === "uploading")) {
+      return;
+    }
+    const drawn = new Set(
+      attachments.map((attachment) => attachment.source.value),
+    );
+    for (const previewUrl of heldPreviews.current) {
+      if (!drawn.has(previewUrl)) {
+        heldPreviews.current.delete(previewUrl);
+        URL.revokeObjectURL(previewUrl);
+      }
+    }
+  }, [attachments]);
+
+  // And all of them when the composer goes, whatever is still on the strip.
+  useEffect(() => {
+    const previews = heldPreviews.current;
+    return () => {
+      for (const previewUrl of previews) {
+        URL.revokeObjectURL(previewUrl);
+      }
+      previews.clear();
+    };
+  }, []);
 
   /**
    * How many attachments the next screen must count, including any this tick has already accepted.
@@ -722,6 +842,16 @@ export function Composer({
     },
     [disabled, processFiles, queuedAttachmentCount],
   );
+
+  /** `initialFiles` has been put back once, and is not owed again for the life of this composer. */
+  const restoredFiles = useRef(false);
+  useEffect(() => {
+    if (restoredFiles.current || !canAttach || !initialFiles?.length) {
+      return;
+    }
+    restoredFiles.current = true;
+    void stageFiles(initialFiles);
+  }, [canAttach, initialFiles, stageFiles]);
 
   /**
    * The image half of a paste that our own listener let through.
@@ -834,7 +964,30 @@ export function Composer({
        * to suspect the drop path. It costs one function call per drop.
        */
       handleDragLeave(event);
-      void stageFiles(Array.from(event.dataTransfer.files));
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      if (files.length === 0) {
+        /*
+         * A DROP THAT SAID IT CARRIED FILES AND HANDED OVER NONE IS ANSWERED, NOT SWALLOWED.
+         *
+         * `types` carrying "Files" is the drag announcing files; an empty `files` is the webview
+         * failing to produce them (a file from another app it could not read, say). Staging an
+         * empty list does nothing, so the person let go of a screenshot over the box that takes
+         * screenshots and saw nothing at all, which is the report this exists for. A drag carrying
+         * no file (a link, a selection of text) is still nobody's business here.
+         */
+        if (event.dataTransfer?.types.includes("Files")) {
+          setRejected((current) => [
+            ...current,
+            {
+              id: newId(),
+              name: "Dropped file",
+              reason: UNREADABLE_DROP_REASON,
+            },
+          ]);
+        }
+        return;
+      }
+      void stageFiles(files);
     },
     [handleDragLeave, stageFiles],
   );
@@ -856,9 +1009,9 @@ export function Composer({
    * stay orphaned until the 24-hour sweep. The person sees their raw PNG on a blank page and
    * presses Back.
    *
-   * ALWAYS INSTALLED; ONLY THE ACCEPTANCE IS CONDITIONAL. The states that reach here are the three
-   * the `channelId` docblock names — `/channel/new`, the home screen, the onboarding poster — plus
-   * every channel whose composer is `disabled`.
+   * ALWAYS INSTALLED; ONLY THE ACCEPTANCE IS CONDITIONAL. The states that reach here are the ones
+   * the `channelId` docblock names (the onboarding poster, the start placeholder, a group), plus
+   * every composer that is `disabled`.
    *
    * THE APP-WIDE GUARD NOW EXISTS, AND THIS IS STILL NOT REDUNDANT. `useUnclaimedDropGuard` in
    * `routes/__root.tsx` refuses any drop nobody claimed, which covers the transcript, the sidebar,
@@ -1073,6 +1226,9 @@ export function Composer({
 
   const handleChange = useCallback(
     (next: Segment[]) => {
+      // Typing while live dictation listens stops it at once and keeps the box as it is: the
+      // recognizer's later words would otherwise write over what was just typed.
+      dictation.live.session.release();
       const { segments, actions } = applyCommandChips(
         enforceSingleAgent(next),
         commands,
@@ -1084,7 +1240,7 @@ export function Composer({
         action();
       }
     },
-    [commands],
+    [commands, dictation.live.session],
   );
 
   /**
@@ -1095,6 +1251,13 @@ export function Composer({
    */
   const submitDraft = useCallback(
     async (segments: Segment[]) => {
+      // Enter while live dictation listens stops it and keeps the words in the box. It never
+      // sends: the person reads what was heard first, and the next Enter sends it. Asked before
+      // anything else, so an empty box still stops listening.
+      if (dictation.live.session.active) {
+        dictation.live.session.stop();
+        return;
+      }
       // `canSendDraft` rather than `isEmpty`: a screenshot with no words is a message, and an
       // upload still in flight is not one yet, whatever is typed alongside it.
       //
@@ -1108,6 +1271,12 @@ export function Composer({
         disabled ||
         dictation.session.getSnapshot().phase !== "idle"
       ) {
+        return;
+      }
+
+      // Before anything is cleared or parked: a held send keeps every word where it was typed.
+      if (onSendHeld) {
+        onSendHeld();
         return;
       }
 
@@ -1236,9 +1405,11 @@ export function Composer({
     [
       disabled,
       dictation.session,
+      dictation.live.session,
       dismissRejections,
       isBusy,
       onQueue,
+      onSendHeld,
       onSubmit,
       releaseStagedRows,
       removeAttachment,
@@ -1306,7 +1477,18 @@ export function Composer({
   /** Something to send, mid-turn, with a queue to put it in. */
   const parking = canQueue && sendable;
   const canSend =
-    !disabled && !dictation.busy && sendable && (!isBusy || canQueue);
+    !disabled &&
+    !dictation.busy &&
+    !dictation.live.active &&
+    sendable &&
+    (!isBusy || canQueue);
+  /** Live dictation began from the microphone: the caret goes to the end of the box, where Enter stops it. */
+  const focusForDictation = useCallback(() => {
+    promptAreaRef.current?.focus();
+    promptAreaRef.current?.setCursorToEnd();
+  }, []);
+  const placeholder =
+    dictation.live.state.phase === "listening" ? "Listening…" : "Ask anything";
   const canSendRecording =
     !disabled &&
     !tooManyStaged &&
@@ -1479,27 +1661,20 @@ export function Composer({
       <div className="flex flex-col" ref={containerRef} {...dropZone}>
         <RejectedFiles onDismiss={dismissRejections} rejected={rejected} />
         {tooManyStagedNotice}
+        <LiveDictationNotice dictation={dictation} />
         <form
           aria-busy={isBusy}
           data-slot="composer"
           className={cn(
             /*
-             * `py-3` IS LOAD-BEARING ONCE THE TEXT WRAPS. On one line `min-h-14` and the controls
-             * row's own `items-center` fake the vertical padding, so it read as correct for as long
-             * as nobody typed a paragraph. Past that the box grows to fit its content exactly and
-             * the glyphs sit against the border.
+             * The padding goes on the form rather than on the editor because the editor scrolls
+             * internally at COMPACT_MAX_HEIGHT_PX: padding inside that box would scroll away with
+             * the text, so the first visible line would touch the top edge on a long message.
              *
-             * It goes on the form rather than on the editor because the editor scrolls internally
-             * at COMPACT_MAX_HEIGHT_PX: padding inside that box would scroll away with the text, so
-             * the first visible line would still touch the top edge on a long message.
+             * A column: the attachment strip across the top, the message box under it, and the
+             * controls row at the bottom.
              */
-            /*
-             * A COLUMN, SO THE ATTACHMENT STRIP CAN HAVE THE FULL WIDTH. It used to be one row —
-             * attach button, editor, send — with the strip inside the editor's column, which
-             * started it 42px in from the frame's left edge with nothing under it. The strip is
-             * its own row across the top now, and the three controls keep their row below it.
-             */
-            "flex min-h-14 flex-col rounded-2xl border border-border bg-card px-3 py-3 focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
+            "flex flex-col rounded-2xl border border-border bg-card px-3 py-3",
             className,
           )}
           onSubmit={handleFormSubmit}
@@ -1512,66 +1687,59 @@ export function Composer({
               onRemove={discardAttachment}
             />
             {/*
-             * `self-end` ON THE THREE CONTROLS, AND IT COSTS NOTHING ON ONE LINE. The row is
-             * `items-center`, which is right while everything in it is a single line high. A long
-             * message grows the editor to `COMPACT_MAX_HEIGHT_PX`, and centred buttons then float to
-             * the middle of that block rather than sitting on the line the person is typing. Empty,
-             * the row is exactly a button tall, so centred and bottom are the same pixel.
+             * TWO ROWS: the message box across the full width, then the controls under it. Attach
+             * and the model on the left, the microphone and send on the right, so the controls
+             * keep their place however long the message grows.
              */}
-            <div className="flex items-center gap-3">
-              {attachmentsEnabled ? (
-                <Button
-                  aria-label="Attach a file"
-                  className="self-end"
-                  data-slot="composer-attach"
-                  // The button stays, and stays labelled: a conversation that cannot take another
-                  // message has not lost the ability to attach, it has lost the message. Swapping it
-                  // for the "unavailable" placeholder would say the wrong thing about why.
-                  disabled={disabled}
-                  onClick={() => fileInputRef.current?.click()}
-                  size="icon"
-                  type="button"
-                  variant="ghost"
-                >
-                  <IconPlus className="size-5" />
-                </Button>
-              ) : (
-                <Button
-                  aria-label="More message options unavailable"
-                  className="self-end disabled:opacity-100"
-                  disabled
-                  size="icon"
-                  type="button"
-                  variant="ghost"
-                >
-                  <IconPlus className="size-5" />
-                </Button>
-              )}
-              {/* The slot is ours: `PromptArea` passes no attribute through to its own box. */}
-              <div className="min-w-0 flex-1" data-slot="composer-input">
-                <PromptArea
-                  aria-label="Message"
-                  className={cn(
-                    "w-full border-0 bg-transparent p-0 text-sm shadow-none",
-                    editorClassName,
-                  )}
-                  disabled={disabled}
-                  maxHeight={COMPACT_MAX_HEIGHT_PX}
-                  minHeight={COMPACT_MIN_HEIGHT_PX}
-                  onChange={handleChange}
-                  onImagePaste={canAttach ? stagePastedImage : undefined}
-                  onSubmit={submitDraft}
-                  placeholder="Ask anything"
-                  ref={promptAreaRef}
-                  triggers={triggers}
-                  value={value}
-                />
-              </div>
-              <DictationButton
-                dictation={dictation}
-                disabled={disabled || voiceCall?.active === true}
+            <div className="min-w-0" data-slot="composer-input">
+              <PromptArea
+                aria-label="Message"
+                className={cn(
+                  "w-full border-0 bg-transparent p-0 text-sm shadow-none",
+                  editorClassName,
+                )}
+                disabled={disabled}
+                maxHeight={COMPACT_MAX_HEIGHT_PX}
+                minHeight={COMPACT_MIN_HEIGHT_PX}
+                onChange={handleChange}
+                onImagePaste={canAttach ? stagePastedImage : undefined}
+                onSubmit={submitDraft}
+                placeholder={placeholder}
+                ref={promptAreaRef}
+                triggers={triggers}
+                value={value}
               />
-              {primaryAction}
+            </div>
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-1">
+                {attachmentsEnabled ? (
+                  <Button
+                    aria-label="Attach a file"
+                    data-slot="composer-attach"
+                    // The button stays, and stays labelled: a conversation that cannot take another
+                    // message has not lost the ability to attach, it has lost the message.
+                    disabled={disabled}
+                    onClick={() => fileInputRef.current?.click()}
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <IconPlus className="size-5" />
+                  </Button>
+                ) : null}
+                {/* No attachments and nothing else behind a plus, so no plus: a disabled one that
+                    explained nothing read as broken. */}
+                {routine ? <RoutineComposerButton {...routine} /> : null}
+                {modelPicker}
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <DictationButton
+                  dictation={dictation}
+                  disabled={disabled || voiceCall?.active === true}
+                  onStarted={focusForDictation}
+                />
+                {primaryAction}
+              </div>
             </div>
           </DictationSurface>
         </form>
@@ -1589,6 +1757,15 @@ export function Composer({
     >
       <RejectedFiles onDismiss={dismissRejections} rejected={rejected} />
       {tooManyStagedNotice}
+      {/*
+       * THE NOTICE TAKES ITS OWN ROOM, AND THE BOX STAYS WHERE IT IS. This composer is the one Home
+       * centres in the page. Above the box in the flow alone, the notice pushed the box down by half
+       * its height (16px for one line); drawn over the space above it instead, it sat on the starter
+       * tasks. So it is in the flow above the box, and an invisible copy of it, the same height, is
+       * in the flow below: the centred block grows by the same amount on both sides of the box, the
+       * greeting and the tasks move up to make room, and the box holds still.
+       */}
+      <LiveDictationNotice dictation={dictation} />
       <form
         aria-busy={isBusy}
         className="overflow-hidden rounded-2xl border border-border bg-card"
@@ -1621,7 +1798,7 @@ export function Composer({
                 onChange={handleChange}
                 onImagePaste={canAttach ? stagePastedImage : undefined}
                 onSubmit={submitDraft}
-                placeholder="Ask anything"
+                placeholder={placeholder}
                 ref={promptAreaRef}
                 triggers={triggers}
                 value={value}
@@ -1647,38 +1824,28 @@ export function Composer({
             )}
 
             <div className="flex items-center gap-1">
+              {modelPicker}
               <DictationButton
                 dictation={dictation}
                 disabled={disabled || voiceCall?.active === true}
+                onStarted={focusForDictation}
               />
               {primaryAction}
             </div>
           </div>
         </DictationSurface>
       </form>
+      {/* The notice's invisible copy, below the box: see above. Hidden from everyone and inert. */}
+      <div
+        aria-hidden="true"
+        className="invisible"
+        data-slot="composer-dictate-notice-balance"
+        inert
+      >
+        <LiveDictationNotice dictation={dictation} />
+      </div>
     </div>
   );
-}
-
-/**
- * GIVE BACK THE STAGED ROW A REMOVED CHIP STOOD FOR — THE ONLY CALLER THIS ENDPOINT HAS.
- *
- * `removeAttachment` only filters client state, so until this existed, attach-then-change-your-mind
- * left the row staged with `attachedAt IS NULL` for good. The upload handler counts exactly those
- * rows per person per channel and refuses the ninth with "You already have 8 attachments waiting to
- * send in this channel." — naming files that are on nobody's screen, with no way back.
- *
- * BEST-EFFORT, AND DELIBERATELY UNINSPECTED. The chip is gone from the strip before this is called,
- * because that is what the person asked for; making that wait on a round trip, or reporting what
- * comes back, would put an error in front of somebody for a request they never made. There are two
- * such answers — 404 for a non-uploader, 409 for an attachment already sent — and neither is
- * actionable. `cull-staged-attachments.ts` is the backstop for whatever this misses.
- */
-function discardStagedAttachment(attachmentId: string): void {
-  void fetch(attachmentUrl(attachmentId), {
-    method: "DELETE",
-    credentials: "include",
-  }).catch(() => undefined);
 }
 
 /**

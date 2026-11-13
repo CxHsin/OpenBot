@@ -1,16 +1,11 @@
-import {
-  IconBolt,
-  IconChevronRight,
-  IconPlus,
-  IconShare,
-} from "@tabler/icons-react";
+import { IconBolt, IconChevronRight, IconPlus } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Fragment, useState } from "react";
 import { AbstractAvatar } from "@/components/agents/abstract-avatar";
+import { LoadingRows } from "@/components/layout/loading-rows";
 import {
   attentionSummary,
-  needsInput,
   waitingOnYou,
 } from "@/components/bot-profile/attention";
 import {
@@ -18,11 +13,8 @@ import {
   PageRows,
   PageSection,
 } from "@/components/layout/page-shell";
-import {
-  DoneTasks,
-  NeedsYouRows,
-  useNeedsYou,
-} from "@/components/needs-you/needs-you";
+import { NeedsYouBoard } from "@/components/needs-you/board";
+import { DoneTasks, useNeedsYou } from "@/components/needs-you/needs-you";
 import { Button } from "@/components/ui/button";
 import {
   Item,
@@ -35,10 +27,12 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { type AgentProfile, agentListQueryOptions } from "@/lib/agents/queries";
 import { groupRoster } from "@/lib/agents/roster";
+import { shownSubtitle } from "@/lib/agents/subtitle";
 import {
   type BotAttention,
   botAttentionQueryOptions,
 } from "@/lib/bot-lifecycle/queries";
+import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
 
 /**
  * Every Bot the person can reach, in the one place they are listed: what needs the person first,
@@ -52,13 +46,20 @@ import {
  * This replaces three screens (Bots, Agents and Team Bots) that listed the same Bots three ways.
  */
 export function BotRoster() {
+  const personal =
+    useQuery(deploymentCapabilitiesQueryOptions()).data?.edition === "personal";
   const agents = useQuery(agentListQueryOptions());
   const hidden = useQuery(agentListQueryOptions(true));
   const attention = useQuery(botAttentionQueryOptions());
   const list = useNeedsYou();
   const byId = new Map((attention.data ?? []).map((bot) => [bot.agentId, bot]));
 
-  if (agents.isPending) return null;
+  if (agents.isPending)
+    return (
+      <PageSection>
+        <LoadingRows label="Loading your Bots" media="avatar" />
+      </PageSection>
+    );
   // Only when nothing ever loaded: a failed background refetch keeps the roster it had.
   if (agents.data === undefined) {
     return (
@@ -67,91 +68,81 @@ export function BotRoster() {
       </p>
     );
   }
-  const { needsYou, pinned, yours, shared } = groupRoster(
-    agents.data,
-    (agentId) => {
-      const state = byId.get(agentId);
-      return state ? needsInput(state) : 0;
-    },
+  // Every Bot stays in its own section; what it waits on is on the board above, by name.
+  const { pinned, yours, shared } = groupRoster(agents.data);
+  const available = pinned.length + yours.length + shared.length;
+  const hiddenCount = hidden.data?.length ?? 0;
+  const newBot = (
+    <Button
+      render={(props) => <Link {...props} search={{ new: true }} to="/bots" />}
+      size="sm"
+      variant="outline"
+    >
+      <IconPlus />
+      New Bot
+    </Button>
   );
-  const yoursPinned = pinned.some((agent) => agent.mine);
-  const yoursWaiting = needsYou.some((agent) => agent.mine);
 
   return (
     <>
-      {needsYou.length || list.tasks.length || list.items.length ? (
-        <PageSection title="Needs you">
-          {list.error ? (
-            <p className="mt-4 text-destructive text-sm" role="alert">
-              {list.error.message}
-            </p>
-          ) : null}
-          <NeedsYouRows
-            items={list.items}
-            lead={needsYou.map((agent) => (
-              <RosterRow
-                agent={agent}
-                key={agent.id}
-                state={byId.get(agent.id)}
-              />
-            ))}
-            tasks={list.tasks}
-          />
-        </PageSection>
-      ) : null}
+      {/*
+       * What waits on the person, each thing under the Bot it came from and decided where it is.
+       * A Bot waiting on them stays in its own section below too, with its badge.
+       */}
+      <NeedsYouBoard />
+      {/*
+       * AVAILABLE BOTS FIRST, AND ONLY SECTIONS WITH BOTS IN THEM. An empty Yours used to sit above
+       * the assistant OpenBot includes, so the first thing a new person read was "No Bots yet" over
+       * a Bot they could talk to. The way to make one is a sentence after them instead, beside the
+       * page's own New Bot.
+       */}
       {pinned.length ? (
         <PageSection title="Pinned">
           <RosterRows agents={pinned} byId={byId} />
         </PageSection>
       ) : null}
-      <PageSection title="Yours">
-        {yours.length ? (
+      {yours.length ? (
+        <PageSection title="Yours">
           <RosterRows agents={yours} byId={byId} />
-        ) : (
-          <PageEmpty
-            action={
-              yoursPinned || yoursWaiting ? undefined : (
-                <Button
-                  render={(props) => (
-                    <Link {...props} search={{ new: true }} to="/bots" />
-                  )}
-                  size="sm"
-                  variant="outline"
-                >
-                  <IconPlus />
-                  New Bot
-                </Button>
-              )
-            }
-            icon={IconBolt}
-            title={
-              yoursPinned
-                ? "All pinned"
-                : yoursWaiting
-                  ? "All waiting on you"
-                  : "No Bots yet"
-            }
-          >
-            {yoursPinned
-              ? "Your Bots are all pinned above."
-              : yoursWaiting
-                ? "Your Bots are all under Needs you."
-                : "Bots you create show up here."}
-          </PageEmpty>
-        )}
-      </PageSection>
-      <PageSection title="Shared with you">
-        {shared.length ? (
+        </PageSection>
+      ) : null}
+      {shared.length ? (
+        <PageSection
+          title={personal ? "Included with OpenBot" : "Shared with you"}
+        >
           <RosterRows agents={shared} byId={byId} />
-        ) : (
-          <PageEmpty icon={IconShare} title="Nothing shared yet">
-            Bots somebody shares with you show up here.
-          </PageEmpty>
-        )}
-      </PageSection>
+        </PageSection>
+      ) : null}
+      {available === 0 ? (
+        // Waits for the hidden list, so it never says "No Bots yet" to someone who hid theirs.
+        hidden.isPending ? null : (
+          <PageSection>
+            <PageEmpty
+              action={newBot}
+              icon={IconBolt}
+              title={hiddenCount ? "No Bots on your list" : "No Bots yet"}
+            >
+              {hiddenCount
+                ? "The Bots you hid are below. Create a Bot for a specific job."
+                : "Create a Bot for a specific job."}
+            </PageEmpty>
+          </PageSection>
+        )
+      ) : yours.length === 0 ? (
+        <p className="mt-12 text-muted-foreground text-sm">
+          Create a Bot for a specific job.{" "}
+          <Link
+            className="font-medium text-foreground underline underline-offset-4"
+            search={{ new: true }}
+            to="/bots"
+          >
+            New Bot
+          </Link>
+        </p>
+      ) : null}
       <DoneTasks done={list.done} />
       {hidden.data?.length ? (
-        <HiddenSection agents={hidden.data} byId={byId} />
+        <HiddenSection agents={hidden.data} byId={byId} personal={personal} />
       ) : null}
     </>
   );
@@ -159,14 +150,17 @@ export function BotRoster() {
 
 /**
  * The Bots this person hid, folded until asked for: a way back for somebody who hid something, not
- * a fourth list everybody reads past. A Bot's page is where Unhide lives.
+ * a fourth list everybody reads past. A Bot's page is where Unhide lives. The personal edition has
+ * nobody else with a list, so it doesn't say only theirs changed.
  */
 function HiddenSection({
   agents,
   byId,
+  personal,
 }: {
   agents: AgentProfile[];
   byId: Map<string, BotAttention>;
+  personal: boolean;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -176,7 +170,7 @@ function HiddenSection({
           {open ? "Hide" : "Show"}
         </Button>
       }
-      description={`${agents.length} ${agents.length === 1 ? "Bot" : "Bots"} you hid. Only your list changes.`}
+      description={`${agents.length} ${agents.length === 1 ? "Bot" : "Bots"} you hid.${personal ? "" : " Only your list changes."}`}
       title="Hidden"
     >
       {open ? <RosterRows agents={agents} byId={byId} /> : null}
@@ -231,7 +225,9 @@ function RosterRow({
       </ItemMedia>
       <ItemContent>
         <ItemTitle>{agent.name}</ItemTitle>
-        <ItemDescription>{summary || agent.title}</ItemDescription>
+        <ItemDescription>
+          {summary || shownSubtitle(agent.title)}
+        </ItemDescription>
       </ItemContent>
       <ItemActions>
         {waiting > 0 ? (

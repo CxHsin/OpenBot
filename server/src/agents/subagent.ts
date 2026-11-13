@@ -35,6 +35,7 @@ import { createTurnRunner } from "@openbot/toolkit/run-turn";
 import { z } from "zod";
 import { currentApprovalContext } from "../approvals/types";
 import type { AuditInitiator } from "../audit";
+import type { ProductSurface } from "../telemetry/product";
 import { REFUSAL_MARKER } from "../plugins/tools";
 import { withoutTurnScheduling } from "../scheduling/turns";
 
@@ -60,6 +61,11 @@ export const SUBAGENT_HANDED_BACK =
 
 /** The run asking, as this deployment knows it. */
 export type SubagentParent = {
+  runId?: string;
+  /** The asking run's root task, as its analytics context states it; the subagent works for it. */
+  rootTaskId?: string;
+  /** Where the asking run's person is: the subagent's work reaches them there. */
+  surface?: ProductSurface;
   actorId: string;
   botId: string;
   threadId: string;
@@ -130,9 +136,18 @@ export function createSubagents(options: {
       return {
         name: SUBAGENT_TOOL,
         ref: `bot/${SUBAGENT_TOOL}`,
+        /*
+         * The rule the prompt's subagents section gives, cost first. This used to say "whenever work
+         * takes more than two or three calls", the threshold the prompt had already dropped after a
+         * Bot split one web search three ways, so the two disagreed on every run. Anthropic found a
+         * subagent tool whose description states its cost first is called about a third less often,
+         * with the same results.
+         */
         description:
           "Give one self-contained part of your work to a subagent: a fresh copy of you, with your tools, acting for the same person, that sees none of this conversation and returns only its answer. " +
-          "Use it instead of making many tool calls yourself, whenever work takes more than two or three calls or a lot of reading. Call it several times in one step to run independent parts at the same time. " +
+          "Each one is slower than doing the work yourself and is more for the person to follow, so use it only when a request falls into several independent parts that each need a lot of reading of their own, such as one account, document or company each. " +
+          "A single question, one search, or a lookup that takes a handful of tool calls, do yourself. " +
+          "Give it everything it needs to know and say what answer you want back. Call it several times in one step to run independent parts at the same time. " +
           "If the subagent reaches an action that needs the person's approval, it stops and hands that action back to you.",
         parameters,
         initiator: parent.initiator,
@@ -168,6 +183,12 @@ export function createSubagents(options: {
             const { replyText } = await withoutTurnScheduling(() =>
               runTurn({
                 ownerUserId: parent.actorId,
+                telemetry: {
+                  trigger: "subagent",
+                  surface: parent.surface,
+                  parentRunId: parent.runId,
+                  inheritedRootTaskId: parent.rootTaskId,
+                },
                 routineId: SUBAGENT_TOOL,
                 agentId: parent.botId,
                 threadId,

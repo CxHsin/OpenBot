@@ -7,11 +7,12 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import {
   activitySummary,
   BotActivityGlance,
   BotActivityRow,
+  BotActivitySections,
 } from "@/components/bot-profile/activity";
 import { SuggestionsInbox } from "@/components/suggestions/proactive-panel";
 import type { ActivityItem, BotActivity } from "@/lib/bot-lifecycle/queries";
@@ -67,7 +68,118 @@ test("the activity row counts what is running and what is lined up", () => {
   expect(activitySummary(activity(0, 0, 4))).toBe(
     "Nothing running or scheduled",
   );
-  expect(activitySummary(activity(0, 0, 0))).toBe("Nothing yet");
+  expect(activitySummary(activity(0, 0, 0))).toBe(
+    "No tasks, routines or goals yet",
+  );
+});
+
+/*
+ * FOUND ON WINDOWS: a goal that only runs when asked sat under Scheduled, and a Bot with one routine
+ * and that goal read "2 scheduled".
+ */
+test("a goal that runs only when asked is counted as on demand, never as scheduled", async () => {
+  const [routine] = items(1, "Check releases");
+  const goal = {
+    ...(routine as ActivityItem),
+    id: "responsibility:watch",
+    kind: "responsibility",
+    title: "Watch OpenBot releases",
+    detail: "Runs when asked",
+    status: "active",
+  } as ActivityItem;
+  const data = {
+    inProgress: [],
+    scheduled: [{ ...(routine as ActivityItem), status: "scheduled" }],
+    onDemand: [goal],
+    completed: [],
+  };
+  expect(activitySummary(data)).toBe("1 scheduled · 1 on demand");
+  expect(activitySummary({ ...data, scheduled: [] })).toBe("1 on demand");
+
+  const page = glance(data);
+  expect(await page.findByText("1 scheduled · 1 on demand")).toBeTruthy();
+  expect(page.getByText("Watch OpenBot releases")).toBeTruthy();
+  cleanup();
+
+  // The Activity page doesn't list them a second time: one row goes to the Bot's Routines.
+  const sections = glance(data, BotActivitySections);
+  const routines = (await sections.findByText("Routines")).closest("a");
+  expect(routines?.getAttribute("href")).toBe("/bots/scout/routines");
+  expect(routines?.textContent).toContain("1 scheduled · 1 on demand");
+  expect(sections.queryByRole("heading", { name: "On demand" })).toBeNull();
+  expect(sections.queryByText("Watch OpenBot releases")).toBeNull();
+  expect(sections.queryByText("Check releases 1")).toBeNull();
+});
+
+/*
+ * The Bot's own follow-ups, a queued run of a goal and a delegated task waiting its turn are lined
+ * up too, and the Routines page does not list them. They stay under Scheduled, a follow-up with its
+ * Cancel, and the row to Routines counts only the routines.
+ */
+test("Scheduled keeps the follow-ups and queued runs Routines doesn't list, with their Cancel", async () => {
+  const [routine] = items(1, "Check releases");
+  const base = routine as ActivityItem;
+  const followUp: ActivityItem = {
+    ...base,
+    id: "wake-up:42",
+    kind: "follow_up",
+    title: "Chase the invoice reply",
+    status: "scheduled",
+    cancellable: true,
+  };
+  const queuedRun: ActivityItem = {
+    ...base,
+    id: "responsibility-run:7",
+    kind: "responsibility",
+    title: "Run of Watch OpenBot releases",
+    status: "queued",
+  };
+  const goal: ActivityItem = {
+    ...base,
+    id: "responsibility:watch",
+    kind: "responsibility",
+    title: "Watch OpenBot releases",
+    status: "active",
+  };
+  const data: BotActivity = {
+    inProgress: [],
+    scheduled: [
+      { ...base, id: "routine:r1", status: "scheduled" },
+      goal,
+      followUp,
+      queuedRun,
+    ],
+    onDemand: [],
+    completed: [],
+  };
+  const cancelled: string[] = [];
+  const view = glance(data, BotActivitySections);
+  const fetchActivity = global.fetch;
+  global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith("/follow-ups/cancel")) {
+      cancelled.push(String(init?.body));
+      return Response.json({ ok: true });
+    }
+    return fetchActivity(input, init);
+  }) as typeof fetch;
+
+  expect(await view.findByRole("heading", { name: "Scheduled" })).toBeTruthy();
+  const followUpRow = view
+    .getByText("Chase the invoice reply")
+    .closest("[data-slot=item]") as HTMLElement;
+  expect(followUpRow).toBeTruthy();
+  expect(view.getByText("Run of Watch OpenBot releases")).toBeTruthy();
+  // The routine and the goal are on the Routines page, so not here.
+  expect(view.queryByText("Check releases 1")).toBeNull();
+  expect(view.queryByText("Watch OpenBot releases")).toBeNull();
+  const routines = view.getByText("Routines").closest("a");
+  expect(routines?.textContent).toContain("2 scheduled");
+  expect(routines?.textContent).not.toContain("4 scheduled");
+
+  const cancel = followUpRow.querySelector("button") as HTMLButtonElement;
+  expect(cancel.textContent).toBe("Cancel");
+  fireEvent.click(cancel);
+  await waitFor(() => expect(cancelled).toEqual(['{"id":"wake-up:42"}']));
 });
 
 test("the newest three suggestions show, and the rest open in place", async () => {
@@ -168,4 +280,37 @@ test("with nothing running or scheduled, there is no Activity section, and For y
   expect(titles).toEqual(["Activity"]);
   expect(section.container.querySelector("[data-slot=item]")).toBeNull();
   expect(section.queryByRole("heading", { name: "Activity" })).toBeNull();
+});
+
+test("a long title is cut to one line with an ellipsis, and the whole of it shows on hover", async () => {
+  // Seen on the Bot page: "...releases) and post one l", cut mid-word with nothing to say so.
+  const long =
+    "Check the latest release of CopilotKit/OpenBot on GitHub (https://github.com/CopilotKit/OpenBot/releases) and post one line in this conversation with its version number (tag) and release date.";
+  const [scheduled] = items(1, "Scheduled");
+  const view = glance({
+    inProgress: [],
+    scheduled: [{ ...(scheduled as ActivityItem), title: long }],
+    completed: [],
+  });
+
+  const title = await view.findByText(long);
+  expect(title.getAttribute("data-slot")).toBe("item-title");
+  expect(title.getAttribute("title")).toBe(long);
+  expect(title.className).toContain("truncate");
+  // The row's content may shrink below its text, or the ellipsis never shows.
+  expect(title.parentElement?.className).toContain("min-w-0");
+});
+
+test("a goal's activity row says Goal and opens the Bot's routines", async () => {
+  const [running] = items(1, "Close the month");
+  const view = glance({
+    inProgress: [{ ...(running as ActivityItem), kind: "responsibility" }],
+    scheduled: [],
+    completed: [],
+  });
+  const title = await view.findByText("Close the month 1");
+  const row = title.closest("a");
+  expect(row?.getAttribute("href")).toBe("/bots/scout/routines");
+  expect(row?.textContent).toContain("Goal · running");
+  expect(row?.textContent).not.toMatch(/responsibilit/i);
 });

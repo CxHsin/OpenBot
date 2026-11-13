@@ -22,20 +22,20 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { BotNeedsYou } from "@/components/approvals/waiting";
 import { BotRoster } from "@/components/bots/bot-roster";
+import { BotNeedsYou } from "@/components/needs-you/board";
+import { queryClient } from "@/query-client";
 import {
   TASKS_VIEW_STORAGE_KEY,
   TasksScreen,
 } from "@/skins/openduet/tasks-screen";
-import { queryClient } from "@/query-client";
 import { settleReactWork } from "./settle-react-work";
 
 /*
  * What a Bot's check-ins found and the tasks started from them, where the person meets them: the
  * Bots page's Needs you, the Bot's own page, and the OpenDuet skin's Tasks. All three are drawn at
  * once, in one cache, against a fake of OpenBot's API that keeps state the way the real routes do:
- * Hide takes an item off the open list, Start takes it off and opens a task, and a task's actions
+ * Dismiss takes an item off the open list, Work on it takes it off and opens a task, and a task's actions
  * move its status. The fake answers in the shapes `server/src/proactive/contracts.ts` promises.
  */
 
@@ -123,6 +123,15 @@ const task = (overrides: Partial<Task> & { id: string; title: string }) => ({
 
 let items: Item[] = [];
 let tasks: Task[] = [];
+let questions: {
+  id: string;
+  botId: string;
+  threadId: string;
+  question: string;
+  createdAt: string;
+}[] = [];
+/** Reads that fail right now, by path, to test a board drawn from some sources and not others. */
+let failing = new Set<string>();
 /** Conversations a turn is running in right now, as the sidebar's live list says. */
 let busy: string[] = [];
 const sent: { method: string; path: string }[] = [];
@@ -133,6 +142,8 @@ function serving() {
     const path = String(input);
     const method = init?.method ?? "GET";
     if (method !== "GET") sent.push({ method, path });
+    if (method === "GET" && failing.has(path))
+      return Response.json({ error: "Server error" }, { status: 500 });
     const started = path.match(/^\/api\/proactive\/suggestions\/(.+)\/start$/);
     if (started) {
       const found = items.find((entry) => entry.id === started[1]);
@@ -200,7 +211,7 @@ function serving() {
         rules: [],
         teamRules: [],
         requests: [],
-        questions: [],
+        questions,
       });
     if (path === "/api/bots/attention")
       return Response.json({ bots: [], lastPingId: null });
@@ -224,8 +235,10 @@ function serving() {
 beforeEach(() => {
   items = [];
   tasks = [];
+  questions = [];
+  failing = new Set();
   busy = [];
-  // Start, Hide and a task's actions invalidate the app's one cache, so the lists draw from it.
+  // Work on it, Dismiss and a task's actions invalidate the app's one cache, so the lists draw from it.
   queryClient.clear();
 });
 
@@ -277,7 +290,7 @@ async function drawAll() {
   return { view, region };
 }
 
-test("an item says what it is, why, which Bot found it and where, with Start and Hide", async () => {
+test("an item says what it is, why, which Bot found it and where, with Work on it and Dismiss", async () => {
   items = [item({ id: "s1", title: "Send Dana the Q3 numbers" })];
   serving();
   const { view, region } = await drawAll();
@@ -287,10 +300,15 @@ test("an item says what it is, why, which Bot found it and where, with Start and
   expect(
     bots.getByText("Dana asked for the Q3 numbers by Friday."),
   ).toBeTruthy();
-  expect(bots.getByText(/^Inbox Bot · From Gmail · /)).toBeTruthy();
-  expect(bots.getByRole("button", { name: "Start" })).toBeTruthy();
-  expect(bots.getByRole("button", { name: "Hide" })).toBeTruthy();
-  const open = bots.getByRole("button", { name: "Open mail.example.com" });
+  // Under its Bot's header, from the app it was read with.
+  expect(bots.getByText("From check-ins")).toBeTruthy();
+  expect(bots.getByText("· from its check-ins")).toBeTruthy();
+  expect(bots.getByText("Gmail")).toBeTruthy();
+  expect(bots.getByRole("button", { name: "Work on it" })).toBeTruthy();
+  expect(
+    bots.getByRole("button", { name: "Dismiss Send Dana the Q3 numbers" }),
+  ).toBeTruthy();
+  const open = bots.getByRole("link", { name: "Open mail.example.com" });
   expect(open.getAttribute("href")).toBe("https://mail.example.com/1");
   expect(open.getAttribute("target")).toBe("_blank");
 });
@@ -309,13 +327,13 @@ test("Open names the site its link goes to, never the app the Bot read it with",
   const { view, region } = await drawAll();
   await view.findAllByText("Review Bun 1.4.4 release notes");
   const bots = region("Bots page");
-  expect(bots.getByText(/^Inbox Bot · From Exa Search · /)).toBeTruthy();
-  expect(bots.queryByRole("button", { name: /Exa Search/ })).toBeNull();
-  const open = bots.getByRole("button", { name: "Open bun.com" });
+  expect(bots.getByText("Exa Search")).toBeTruthy();
+  expect(bots.queryByRole("link", { name: /Exa Search/ })).toBeNull();
+  const open = bots.getByRole("link", { name: "Open bun.com" });
   expect(open.getAttribute("href")).toBe("https://www.bun.com/blog/bun-v1.4.4");
 });
 
-test("Hide takes an item off the Bots page, the Bot's page and OpenDuet at once", async () => {
+test("Dismiss takes an item off the Bots page, the Bot's page and OpenDuet at once", async () => {
   items = [
     item({ id: "s1", title: "Send Dana the Q3 numbers" }),
     item({ id: "s2", title: "Renew the studio insurance" }),
@@ -328,7 +346,11 @@ test("Hide takes an item off the Bots page, the Bot's page and OpenDuet at once"
   const row = region("Bot page")
     .getByText("Send Dana the Q3 numbers")
     .closest("[data-slot=item]") as HTMLElement;
-  fireEvent.click(within(row).getByRole("button", { name: "Hide" }));
+  fireEvent.click(
+    within(row).getByRole("button", {
+      name: "Dismiss Send Dana the Q3 numbers",
+    }),
+  );
   await waitFor(() =>
     expect(view.queryAllByText("Send Dana the Q3 numbers")).toHaveLength(0),
   );
@@ -340,20 +362,18 @@ test("Hide takes an item off the Bots page, the Bot's page and OpenDuet at once"
   expect(view.getAllByText("Renew the studio insurance")).toHaveLength(3);
 });
 
-test("Start takes the item off and shows its task, Working, opening its own conversation", async () => {
+test("Work on it takes the item off and shows its task, Working, opening its own conversation", async () => {
   items = [item({ id: "s1", title: "Send Dana the Q3 numbers" })];
   serving();
   const { view, region } = await drawAll();
   const bots = region("Bots page");
-  fireEvent.click(await bots.findByRole("button", { name: "Start" }));
-  await waitFor(() =>
-    expect(bots.getByText(/^Working · Inbox Bot · /)).toBeTruthy(),
-  );
+  fireEvent.click(await bots.findByRole("button", { name: "Work on it" }));
+  await waitFor(() => expect(bots.getByText("Working")).toBeTruthy());
   expect(sent).toEqual([
     { method: "POST", path: "/api/proactive/suggestions/s1/start" },
   ]);
-  // The item became the task: no Start or Hide left for it anywhere.
-  expect(view.queryAllByRole("button", { name: "Start" })).toHaveLength(0);
+  // The item became the task: nothing left to start or dismiss for it anywhere.
+  expect(view.queryAllByRole("button", { name: "Work on it" })).toHaveLength(0);
   expect(bots.getByText("Just started.")).toBeTruthy();
   const row = bots
     .getByText("Send Dana the Q3 numbers")
@@ -362,7 +382,7 @@ test("Start takes the item off and shows its task, Working, opening its own conv
     within(row).getByRole("button", { name: "Open" }).getAttribute("href"),
   ).toBe("/channel/c-task-s1");
   // The Bot's own page lists it too.
-  expect(region("Bot page").getByText(/^Working · Inbox Bot · /)).toBeTruthy();
+  expect(region("Bot page").getByText("Working")).toBeTruthy();
 });
 
 test("tasks list what to read, answer and retry first, and each acts from its row", async () => {
@@ -440,9 +460,7 @@ test("a task whose conversation is running a turn reads Working, whatever the se
   serving();
   const { region } = await drawAll();
   const bots = region("Bots page");
-  await waitFor(() =>
-    expect(bots.getByText(/^Working · Inbox Bot · /)).toBeTruthy(),
-  );
+  await waitFor(() => expect(bots.getByText("Working")).toBeTruthy());
 });
 
 test("OpenDuet's Active lists the tasks under OpenDuet's headings, in its order", async () => {
@@ -481,4 +499,132 @@ test("OpenDuet's Active lists the tasks under OpenDuet's headings, in its order"
   expect(order.indexOf("Ready for review")).toBeLessThan(
     order.indexOf("Working"),
   );
+});
+
+/*
+ * A board drawn from three reads: questions and approvals, tasks, and check-in findings. One failing
+ * must not hide what the others loaded, and must not read as "nothing waiting".
+ */
+const APPROVALS = "/api/approvals";
+const TASKS = "/api/tasks";
+const CHECK_INS = "/api/proactive/suggestions";
+
+async function botPage() {
+  const { region } = await drawAll();
+  return region("Bot page");
+}
+
+const notice = (page: ReturnType<typeof within>, what: string) =>
+  page.queryByText(`Couldn't load ${what}. Some may be missing here.`);
+
+test("approvals failing leaves the check-in findings on the board, with a notice and Retry", async () => {
+  items = [item({ id: "i1", title: "Reply to Dana" })];
+  failing = new Set([APPROVALS]);
+  serving();
+  const page = await botPage();
+  await page.findByText("Reply to Dana");
+  await waitFor(
+    () => expect(notice(page, "questions and approvals")).not.toBeNull(),
+    { timeout: 3000 },
+  );
+  expect(notice(page, "tasks")).toBeNull();
+  expect(notice(page, "check-in findings")).toBeNull();
+});
+
+test("check-ins failing leaves the questions on the board, with a notice", async () => {
+  questions = [
+    {
+      id: "q1",
+      botId: "inbox",
+      threadId: "thread",
+      question: "Which folder?",
+      createdAt: now,
+    },
+  ];
+  failing = new Set([CHECK_INS]);
+  serving();
+  const page = await botPage();
+  await page.findByText(/Which folder\?/);
+  await waitFor(
+    () => expect(notice(page, "check-in findings")).not.toBeNull(),
+    { timeout: 3000 },
+  );
+  expect(notice(page, "questions and approvals")).toBeNull();
+});
+
+test("tasks alone failing says so, and says nothing about the rest", async () => {
+  items = [item({ id: "i1", title: "Reply to Dana" })];
+  failing = new Set([TASKS]);
+  serving();
+  const page = await botPage();
+  await page.findByText("Reply to Dana");
+  await waitFor(() => expect(notice(page, "tasks")).not.toBeNull(), {
+    timeout: 3000,
+  });
+  expect(notice(page, "questions and approvals")).toBeNull();
+  expect(notice(page, "check-in findings")).toBeNull();
+});
+
+test("everything failing shows each notice, and never an empty board", async () => {
+  failing = new Set([APPROVALS, TASKS, CHECK_INS]);
+  serving();
+  const page = await botPage();
+  await waitFor(
+    () => {
+      expect(notice(page, "questions and approvals")).not.toBeNull();
+      expect(notice(page, "tasks")).not.toBeNull();
+      expect(notice(page, "check-in findings")).not.toBeNull();
+    },
+    { timeout: 3000 },
+  );
+  expect(page.getByText("Needs you")).toBeDefined();
+});
+
+test("Retry asks again, keeps what loaded, and the notice clears once it answers", async () => {
+  items = [item({ id: "i1", title: "Reply to Dana" })];
+  questions = [
+    {
+      id: "q1",
+      botId: "inbox",
+      threadId: "thread",
+      question: "Which folder?",
+      createdAt: now,
+    },
+  ];
+  failing = new Set([APPROVALS]);
+  serving();
+  const page = await botPage();
+  await waitFor(
+    () => expect(notice(page, "questions and approvals")).not.toBeNull(),
+    { timeout: 3000 },
+  );
+  expect(page.queryByText(/Which folder\?/)).toBeNull();
+
+  failing = new Set();
+  const alert = page.getByText(
+    "Couldn't load questions and approvals. Some may be missing here.",
+  ).parentElement as HTMLElement;
+  fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+
+  await page.findByText(/Which folder\?/);
+  await waitFor(() =>
+    expect(notice(page, "questions and approvals")).toBeNull(),
+  );
+  expect(page.getByText("Reply to Dana")).toBeDefined();
+});
+
+test("a refetch that fails after a good read keeps the rows and adds the notice", async () => {
+  items = [item({ id: "i1", title: "Reply to Dana" })];
+  serving();
+  const page = await botPage();
+  await page.findByText("Reply to Dana");
+
+  failing = new Set([CHECK_INS]);
+  await queryClient.refetchQueries({ queryKey: ["proactive"] }).catch(() => {});
+
+  await waitFor(
+    () => expect(notice(page, "check-in findings")).not.toBeNull(),
+    { timeout: 3000 },
+  );
+  expect(page.getByText("Reply to Dana")).toBeDefined();
 });

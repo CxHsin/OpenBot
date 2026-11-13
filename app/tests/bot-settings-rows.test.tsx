@@ -27,6 +27,9 @@ afterEach(() => {
 });
 
 const BOT: AgentProfile = {
+  assignedToMe: false,
+  runsOnOpenBotModel: false,
+  keyFromOpenBot: false,
   id: "expenses",
   name: "Expenses",
   title: "Finance",
@@ -147,6 +150,52 @@ test("someone who neither owns the Bot nor administers the deployment does not s
   expect(view.queryByText("Sharing")).toBeNull();
 });
 
+test("the personal edition shows Routines, Skills, Apps, Computer, Approvals and Setup, in that order", async () => {
+  serving("admin");
+  const served = global.fetch;
+  global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) =>
+    String(input) === "/api/capabilities"
+      ? Response.json({ edition: "personal" })
+      : served(input, init)) as unknown as typeof fetch;
+  const view = draw(BOT);
+  expect(await view.findByText("Setup")).toBeTruthy();
+  // The capabilities answer arrives on its own request; wait for the rows it removes to settle.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const titles = [
+    ...view.container.querySelectorAll('[data-slot="item-title"]'),
+  ].map((title) => title.textContent);
+  // Nothing else: no Memory (not offered), no Sharing (nobody to share with), no Reaching you.
+  expect(titles).toEqual([
+    "Routines",
+    "Skills",
+    "Apps",
+    "Computer",
+    "Approvals",
+    "Setup",
+  ]);
+  expect(view.container.querySelector('a[href$="/memory"]')).toBeNull();
+});
+
+test("the team edition keeps the order, with Memory, then Sharing and Reaching you after Setup", async () => {
+  serving("user");
+  const view = draw(BOT);
+  expect(await view.findByText("Reaching you")).toBeTruthy();
+  const titles = [
+    ...view.container.querySelectorAll('[data-slot="item-title"]'),
+  ].map((title) => title.textContent);
+  // No Computer row: this Bot has no computer of its own, and folders need OpenBot Desktop.
+  expect(titles).toEqual([
+    "Routines",
+    "Memory",
+    "Skills",
+    "Apps",
+    "Approvals",
+    "Setup",
+    "Sharing",
+    "Reaching you",
+  ]);
+});
+
 test("an administrator sees Sharing on somebody else's Bot", async () => {
   serving("admin");
   const view = draw({ ...BOT, mine: false });
@@ -160,7 +209,7 @@ test("someone a Bot was published to sees Sharing, where its link is", async () 
   expect(await view.findByText("Whole team")).toBeTruthy();
 });
 
-test("the rows for responsibilities, reach, memory and rules say what this Bot has and open their pages", async () => {
+test("the rows for routines, reach, memory and approvals say what this Bot has and open their pages", async () => {
   serving("user");
   const view = draw(BOT);
   const row = async (title: string, summary: string, path: string) => {
@@ -169,8 +218,43 @@ test("the rows for responsibilities, reach, memory and rules say what this Bot h
       `/bots/expenses/${path}`,
     );
   };
-  await row("Responsibilities", "1 active", "responsibilities");
+  await row("Routines", "3 routines", "routines");
   await row("Reaching you", "Slack", "reach");
   await row("Memory", "1 source", "memory");
-  await row("Approval rules", "1 rule", "approvals");
+  await row("Approvals", "1 rule", "approvals");
+});
+
+/** The personal starter on the harness picked at setup, as OpenBot Desktop on Windows starts it. */
+const ON_HARNESS: AgentProfile = {
+  ...BOT,
+  endpoint: "http://agent-harness:4206/ag-ui",
+  builtIn: false,
+  keyFromOpenBot: true,
+  framework: "LangChain",
+};
+
+function withEdition(edition: "team" | "personal") {
+  const served = global.fetch;
+  global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) =>
+    String(input) === "/api/capabilities"
+      ? Response.json({ edition })
+      : served(input, init)) as unknown as typeof fetch;
+}
+
+test("the personal edition's Setup row names the Bot's framework, not the harness's address", async () => {
+  serving("admin");
+  withEdition("personal");
+  const view = draw(ON_HARNESS);
+  expect(await view.findByText("Runs on LangChain")).toBeTruthy();
+  expect(view.queryByText("agent-harness:4206")).toBeNull();
+});
+
+test("a team deployment's Setup row still shows the address", async () => {
+  serving("admin");
+  withEdition("team");
+  const view = draw(ON_HARNESS);
+  expect(await view.findByText("Setup")).toBeTruthy();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(view.getByText("agent-harness:4206")).toBeTruthy();
+  expect(view.queryByText("Runs on LangChain")).toBeNull();
 });

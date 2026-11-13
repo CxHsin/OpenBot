@@ -16,13 +16,16 @@ import {
 } from "@tanstack/react-router";
 import { cleanup, render, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { CommandMenu } from "@/components/navigation/command-menu";
 import { AppSidebar } from "@/components/app-sidebar/app-sidebar";
+import { TeamFeaturesDialog } from "@/components/edition/team-features-dialog";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { agentKeys } from "@/lib/agents/queries";
 import { authKeys } from "@/lib/auth/queries";
 import { botLifecycleKeys } from "@/lib/bot-lifecycle/queries";
 import { channelKeys } from "@/lib/channels/queries";
-import { NAVIGATION, navigationFor } from "@/lib/navigation";
+import { deploymentKeys } from "@/lib/deployment/queries";
+import { isNavigationLink, NAVIGATION, navigationFor } from "@/lib/navigation";
 import { userPreferencesQueryOptions } from "@/lib/settings/message-list";
 import { settleReactWork } from "./settle-react-work";
 
@@ -52,7 +55,11 @@ const originalWebSocket = globalThis.WebSocket;
 const clients: QueryClient[] = [];
 
 beforeAll(() => {
-  GlobalRegistrator.register({ url: "http://localhost/" });
+  // The business dialog's booking calendar keeps its address but never fetches it.
+  GlobalRegistrator.register({
+    url: "http://localhost/",
+    settings: { navigation: { disableChildFrameNavigation: true } },
+  });
   globalThis.WebSocket = OfflineWebSocket as unknown as typeof WebSocket;
 });
 beforeEach(() => {
@@ -73,18 +80,40 @@ afterAll(async () => {
   GlobalRegistrator.unregister();
 });
 
-function renderSidebar(role: "admin" | "user") {
+function renderSidebar(
+  role: "admin" | "user",
+  edition: "team" | "personal" = "team",
+  /** Serve `/api/me` with this body instead of seeding the person, so the real read runs. */
+  me?: Record<string, unknown>,
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
   clients.push(queryClient);
-  queryClient.setQueryData(authKeys.currentUser(), {
+  queryClient.setQueryData(deploymentKeys.capabilities(), {
+    generativeUi: true,
+    selfHostBanner: false,
+    localEvaluation: edition === "personal",
+    edition,
+  });
+  const person = {
     id: "maya",
     name: "Maya Chen",
     email: "maya@example.com",
     role,
     onboarding: null,
-  });
+  };
+  if (me) {
+    globalThis.fetch = Object.assign(
+      async (input: RequestInfo | URL) =>
+        new URL(String(input), "http://localhost/").pathname === "/api/me"
+          ? Response.json({ user: person, ...me })
+          : Response.json({ error: "not served" }, { status: 404 }),
+      { preconnect: originalFetch.preconnect },
+    );
+  } else {
+    queryClient.setQueryData(authKeys.currentUser(), person);
+  }
   queryClient.setQueryData(userPreferencesQueryOptions("maya").queryKey, {
     messageListEmphasis: "thread",
     selfHostBannerDismissed: true,
@@ -124,6 +153,9 @@ function renderSidebar(role: "admin" | "user") {
       component: () => (
         <SidebarProvider>
           <AppSidebar />
+          {/* Mounted once by the signed-in layout; here so the entry has something to open. */}
+          <TeamFeaturesDialog />
+          <CommandMenu />
         </SidebarProvider>
       ),
     }),
@@ -147,6 +179,7 @@ function links(root: HTMLElement) {
 
 function expected(role: "admin" | "user", section: "primary" | "account") {
   return navigationFor(role)
+    .filter(isNavigationLink)
     .filter((item) => item.section === section)
     .map((item) => ({ label: item.label, to: item.to }));
 }
@@ -168,6 +201,14 @@ test.each(["user", "admin"] as const)(
         to,
       })),
     ).toEqual(expected(role, "primary"));
+    // What a person makes and comes back to, beside Bots, in the order of the eight.
+    expect(links(footer).map(({ to }) => to)).toEqual([
+      "/bots",
+      "/routines",
+      "/memory",
+      "/skills",
+      "/connections",
+    ]);
     // Bots keeps its count of what waits on the person, and only Bots has one.
     const badge = within(footer).getByRole("img", {
       name: "1 thing needs you",
@@ -187,6 +228,32 @@ test.each(["user", "admin"] as const)(
   },
 );
 
+test("the running OpenBot version sits to the right of the person's name, in one row, from /api/me", async () => {
+  const { view } = renderSidebar("user", "team", { version: "v0.3.1" });
+  const version = await view.findByText("v0.3.1");
+  const account = view.getByRole("button", { name: /Maya Chen/ });
+  expect(account.contains(version)).toBe(true);
+  // The name, then the version, side by side in one row that splits its width 80/20.
+  const name = within(account).getByText("Maya Chen");
+  expect(name.nextElementSibling).toBe(version);
+  const row = name.parentElement;
+  expect(row).toBe(version.parentElement);
+  expect(row?.className).toContain("grid-cols-[4fr_1fr]");
+  expect(version.className).toContain("text-right");
+});
+
+test.each([
+  ["null", { version: null }],
+  ["absent", {}],
+])("no version line when the server has none (%s)", async (_label, me) => {
+  const { view } = renderSidebar("user", "team", me);
+  const account = await view.findByRole("button", { name: /Maya Chen/ });
+  expect(
+    view.container.ownerDocument.querySelector('[data-slot="openbot-version"]'),
+  ).toBeNull();
+  expect(account.textContent).not.toMatch(/v\d/);
+});
+
 test("Admin is in the list for admins only", () => {
   const ids = (role: string | undefined) =>
     navigationFor(role).map((item) => item.id);
@@ -195,8 +262,81 @@ test("Admin is in the list for admins only", () => {
   expect(ids(undefined)).not.toContain("admin");
   expect(ids("user")).toEqual([
     "bots",
-    "capabilities",
+    "routines",
+    "memory",
+    "skills",
     "connections",
     "settings",
   ]);
+});
+
+test("the personal edition has Admin, and the feature list beside it", () => {
+  const personal = navigationFor("admin", "personal");
+  expect(
+    personal.some((item) => item.kind !== "dialog" && item.to === "/admin"),
+  ).toBe(true);
+  const dialogs = personal.filter((item) => item.kind === "dialog");
+  expect(dialogs.map((item) => item.id)).toEqual(["team-features"]);
+  // Routines and Skills are in the main menu, as in the team edition. Memory isn't offered.
+  expect(personal.map((item) => item.id)).toEqual([
+    "bots",
+    "routines",
+    "skills",
+    "connections",
+    "admin",
+    "team-features",
+    "settings",
+  ]);
+  // Admin is still for an admin only, in this edition as in the other.
+  expect(navigationFor("user", "personal").map((item) => item.id)).toEqual([
+    "bots",
+    "routines",
+    "skills",
+    "connections",
+    "team-features",
+    "settings",
+  ]);
+  // The team edition is unchanged.
+  expect(navigationFor("admin")).toEqual(navigationFor("admin", "team"));
+  expect(navigationFor("admin").map((item) => item.id)).toContain("admin");
+});
+
+test("in the personal edition the menu opens Admin, and OpenBot for Business beside it", async () => {
+  const { view, user } = renderSidebar("admin", "personal");
+  await user.click(await view.findByRole("button", { name: /Maya Chen/ }));
+  const menu = await view.findByRole("menu");
+  expect(
+    within(menu).getByRole("menuitem", { name: "Admin" }).getAttribute("href"),
+  ).toBe("/admin");
+  const entry = within(menu).getByRole("menuitem", {
+    name: "OpenBot for Business",
+  });
+  // As wide as the links beside it, and marked with OpenBot's own logo.
+  expect(entry.className).toContain("w-full");
+  expect(entry.querySelector("svg image")).toBeTruthy();
+  await user.click(entry);
+  const dialog = await view.findByRole("dialog");
+  expect(
+    within(dialog).getByRole("heading", {
+      level: 2,
+      name: "OpenBot for Business",
+    }),
+  ).toBeTruthy();
+});
+
+test("a single-person install has no Sign out, because nobody signed in", async () => {
+  // OpenBot Desktop: no identity provider, so Sign out could only ever fail with "No identity
+  // provider is configured." and leave the person where they were.
+  const { view, user } = renderSidebar("admin", "personal");
+  await user.click(await view.findByRole("button", { name: /Maya Chen/ }));
+  const menu = await view.findByRole("menu");
+  expect(within(menu).queryByRole("menuitem", { name: "Sign out" })).toBeNull();
+  expect(within(menu).getAllByRole("menuitem").length).toBeGreaterThan(0);
+});
+
+test("the sidebar has no command palette row: Cmd/Ctrl+K opens it", async () => {
+  const { view } = renderSidebar("user");
+  await view.findByRole("link", { name: "Routines" });
+  expect(view.queryByRole("button", { name: /Command palette/ })).toBeNull();
+  expect(view.queryByRole("button", { name: /Search and jump/ })).toBeNull();
 });

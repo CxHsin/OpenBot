@@ -12,8 +12,11 @@ export type SuggestionStatus = "open" | "dismissed" | "started" | "superseded";
 /** Bounds on how often a Bot may look through a person's apps: once an hour at most, once a day at least. */
 export const MIN_INTERVAL_MINUTES = 60;
 export const MAX_INTERVAL_MINUTES = 1440;
-/** How often a new check-in setting runs unless the person chose otherwise: hourly. */
-export const DEFAULT_INTERVAL_MINUTES = 60;
+/**
+ * How often a new check-in runs unless the person chose otherwise: daily. A check-in watches one
+ * thing the person asked about, and once a day is what most people mean by keeping an eye on it.
+ */
+export const DEFAULT_INTERVAL_MINUTES = 1440;
 /** Per run, so one confused run cannot flood the inbox or the memory list. */
 export const MAX_SUGGESTIONS_PER_RUN = 5;
 export const MAX_MEMORIES_PER_RUN = 10;
@@ -70,6 +73,13 @@ export function sameThing(
 }
 
 const focusSchema = z.string().trim().max(1000);
+const subjectSchema = z.string().trim().max(120);
+const sourceLinkSchema = z
+  .string()
+  .trim()
+  .max(2000)
+  .url()
+  .refine((link) => /^https?:\/\//.test(link), "Only a web link.");
 const intervalSchema = z
   .number()
   .int()
@@ -81,6 +91,8 @@ export const proactiveSettingInputSchema = z
     agentId: z.string().trim().min(1).max(128),
     channelId: z.string().trim().min(1).max(128),
     focus: focusSchema.default(""),
+    subject: subjectSchema.default(""),
+    sourceLink: sourceLinkSchema.nullish(),
     intervalMinutes: intervalSchema.default(DEFAULT_INTERVAL_MINUTES),
     enabled: z.boolean().default(true),
   })
@@ -195,6 +207,8 @@ export type ProactiveSetting = {
   channelId: string;
   threadId: string;
   focus: string;
+  subject: string;
+  sourceLink: string | null;
   enabled: boolean;
   intervalMinutes: number;
   nextRunAt: Date;
@@ -229,6 +243,20 @@ export class ProactiveRefusedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ProactiveRefusedError";
+  }
+}
+/**
+ * What a person reads when they asked for a new check-in and the Bot already has one on the same
+ * thing. The New routine screen says it on Name as it is typed; this is the same sentence, for an
+ * answer that crossed with a list the screen hadn't read yet.
+ */
+export const SAME_CHECK_IN =
+  "This Bot already checks in on this. Give this one a different name, or change that one on its row.";
+/** A new check-in was asked for and the Bot already has one on that thing (409). */
+export class ProactiveConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProactiveConflictError";
   }
 }
 export class ProactiveNotFoundError extends Error {

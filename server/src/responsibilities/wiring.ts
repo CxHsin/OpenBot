@@ -1,3 +1,4 @@
+import { productHeadlessBoundary } from "../telemetry/product-boundaries";
 import { buildResponsibilityTurn } from "@openbot/shared/responsibility-turn";
 import type { ComponentCatalog } from "@openbot/toolkit/ports";
 import {
@@ -24,11 +25,12 @@ import type { DeliveryScope } from "../delivery/types";
 import { markUntrusted } from "../untrusted-content";
 import { createWorkQueue } from "../work/queue";
 import {
+  type BusyRetry,
   createResponsibilityEngine,
   type ResponsibilityEngine,
 } from "./engine";
-import { responsibilityTools } from "./tools";
-import type { ResponsibilityStore } from "./types";
+import { goalRunTools } from "./tools";
+import { type ResponsibilityStore, whyItRepeats } from "./types";
 
 /**
  * The deployment's responsibility engine: a responsibility's turn, with the computer when the Bot
@@ -38,6 +40,7 @@ import type { ResponsibilityStore } from "./types";
  * this is created, and a reply reads it when it is posted, never when this is built.
  */
 export function createServerResponsibilityEngine(deps: {
+  productTelemetry?: import("../telemetry/product").ProductTelemetry;
   database: Database;
   responsibilityStore: ResponsibilityStore;
   routineIntelligence: IntelligenceLike;
@@ -55,6 +58,8 @@ export function createServerResponsibilityEngine(deps: {
     scope: DeliveryScope,
     input: { id: string; kind: "reply"; text: string },
   ) => Promise<void>;
+  /** How long a run waits for a busy conversation. `BUSY_RETRY` unless a test says otherwise. */
+  busyRetry?: BusyRetry;
 }): ResponsibilityEngine {
   const {
     database,
@@ -76,26 +81,34 @@ export function createServerResponsibilityEngine(deps: {
     {
       store: responsibilityStore,
       queue: responsibilityQueue,
+      ...(deps.busyRetry ? { busyRetry: deps.busyRetry } : {}),
       runTurn: async (context) => {
         const initiator: AuditInitiator = {
           kind: "responsibility",
           id: context.responsibilityId,
         };
-        const tools = responsibilityTools({
-          store: responsibilityStore,
-          engine: responsibilityEngine,
-          ownerUserId: context.ownerUserId,
-          agentId: context.agentId,
-          channelId: context.channelId,
-          responsibilityRunId: context.runId,
-        });
         const runner = createTurnRunner({
+          ...(deps.productTelemetry
+            ? {
+                prepareRunInput: productHeadlessBoundary(deps.productTelemetry),
+                onKnownStop: deps.productTelemetry.stopKnown,
+              }
+            : {}),
           admission: serverTurnAdmission,
           intelligence: routineIntelligence,
           runner: routineAgentRunner,
           components: componentCatalog,
           buildAgentFor: (input) => buildAgentFor({ ...input, initiator }),
           toolsForTurn: async () => {
+            // Before the model has any tool, so what repeats is read as the run begins.
+            const tools = await goalRunTools({
+              store: responsibilityStore,
+              engine: responsibilityEngine,
+              ownerUserId: context.ownerUserId,
+              agentId: context.agentId,
+              channelId: context.channelId,
+              responsibilityRunId: context.runId,
+            });
             const actor = await actorFor(context.ownerUserId);
             // A Team Bot's teammate uses the Bot, not its owner's signed-in computer.
             const computer =
@@ -166,6 +179,9 @@ export function createServerResponsibilityEngine(deps: {
               `${context.event.source} event`,
             ),
             responsibilityId: context.responsibilityId,
+            ...(context.repeats
+              ? { repeats: whyItRepeats(context.repeats) }
+              : {}),
           }),
         });
       },

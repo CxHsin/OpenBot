@@ -4,9 +4,12 @@ import { CronExpressionParser } from "cron-parser";
 export const MINIMUM_INTERVAL_MS = 15 * 60 * 1000;
 
 export class ScheduleRefusedError extends Error {
-  constructor(message: string) {
+  /** Set when the HTTP routes rewrite the sentence for a person. See `RoutineRefusalCode`. */
+  readonly code?: "unknown_timezone";
+  constructor(message: string, code?: "unknown_timezone") {
     super(message);
     this.name = "ScheduleRefusedError";
+    this.code = code;
   }
 }
 
@@ -149,7 +152,10 @@ export function nextOccurrence(
     throw new ScheduleRefusedError(UNREADABLE_MESSAGE);
   }
   if (!isKnownTimeZone(timezone)) {
-    throw new ScheduleRefusedError(UNKNOWN_TIMEZONE_MESSAGE);
+    throw new ScheduleRefusedError(
+      UNKNOWN_TIMEZONE_MESSAGE,
+      "unknown_timezone",
+    );
   }
   refuseSubFloorCycle(cron, timezone);
 
@@ -305,6 +311,11 @@ export function describeCron(cron: string): string {
           .map((value) => `${pad2(hour)}:${pad2(value)}`);
         return `Every day at ${joinWords(times)}`;
       }
+    }
+
+    // "0 * * * *": once an hour, at one plain minute. The Routines page offers it as Every hour.
+    if (wideOpen && hourField === "*" && minute !== null) {
+      return minute === 0 ? "Every hour" : `Every hour at ${pad2(minute)} past`;
     }
 
     if (minute === null || hour === null) return cron;

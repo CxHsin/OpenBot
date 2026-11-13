@@ -2,6 +2,7 @@ import {
   IconAppsOff,
   IconArrowUpRight,
   IconChevronDown,
+  IconPlug,
   IconPlugOff,
   IconUsers,
 } from "@tabler/icons-react";
@@ -15,11 +16,14 @@ import {
   PageSection,
   PageShell,
 } from "@/components/layout/page-shell";
+import { PluginPage } from "@/components/manage/plugin-page";
 import {
   BrokeredAccountRow,
+  NotConnected,
   useBrokeredAccount,
 } from "@/components/plugins/brokered-account-row";
 import { GrantList } from "@/components/plugins/grant-list";
+import { RoutinesConnectionPage } from "@/components/routines/routines-connection-page";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -36,6 +40,9 @@ import {
 } from "@/components/ui/item";
 import { Separator } from "@/components/ui/separator";
 import { currentUserQueryOptions } from "@/lib/auth/queries";
+import { ALWAYS_ON_APP } from "@/lib/connections/rows";
+import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
+import { useManagePaths } from "@/lib/manage-paths";
 import { connectAccountMutationOptions } from "@/lib/plugins/mutations";
 import {
   brokeredProvenance,
@@ -119,9 +126,16 @@ export const Route = createFileRoute("/_authed/_app/connections/$key")({
    */
   validateSearch: (
     search: Record<string, unknown>,
-  ): { linked?: string; action?: string } => ({
+  ): { linked?: string; action?: string; connect?: true } => ({
     ...searchTextEntry("linked", search.linked),
     ...searchTextEntry("action", search.action),
+    /*
+     * `?connect=true` is Browse apps sending somebody here to finish adding an app that takes a
+     * key: the page opens with the key form. Read once and dropped, so a reload does not reopen it.
+     */
+    ...(search.connect === true || search.connect === "true"
+      ? { connect: true as const }
+      : {}),
   }),
 });
 
@@ -131,18 +145,38 @@ export const Route = createFileRoute("/_authed/_app/connections/$key")({
  */
 function RouteComponent() {
   const { key } = Route.useParams();
-  const { linked } = Route.useSearch();
+  const { linked, action, connect } = Route.useSearch();
+  const personal =
+    useQuery(deploymentCapabilitiesQueryOptions()).data?.edition === "personal";
+  // Held for this visit, keyed on the app, and dropped from the address below.
+  const [arrival] = useState(() => ({ key, connect: connect === true }));
+  const startConnect = arrival.key === key && arrival.connect;
+  const navigate = Route.useNavigate();
+  useEffect(() => {
+    if (connect === undefined) return;
+    navigate({ search: ({ connect: _c, ...rest }) => rest, replace: true });
+  }, [connect, navigate]);
   if (key === "github" || key === "slack") {
     return <IdentityConnectionPage linked={linked} provider={key} />;
   }
-  return <AppConnectionPage />;
+  // Routines has nothing to connect or switch: its page says what it is and leads to the routines.
+  if (key === ALWAYS_ON_APP) return <RoutinesConnectionPage />;
+  /*
+   * The personal edition's app page is the whole app: turning it on, your account, its tools and
+   * which Bots use them, because one person makes all of those decisions. A per-action
+   * authorization (`?action=`) keeps its own page, which is what that flow comes back to.
+   */
+  if (personal && action === undefined)
+    return <PluginPage pluginKey={key} startConnect={startConnect} />;
+  return <AppConnectionPage startConnect={startConnect} />;
 }
 
-function AppConnectionPage() {
+function AppConnectionPage({ startConnect }: { startConnect: boolean }) {
   const { key } = useParams({
     from: "/_authed/_app/connections/$key",
   });
   const { action } = Route.useSearch();
+  const paths = useManagePaths();
   /*
    * `?action=` IS READ ONCE HERE AND DROPPED FROM THE URL BELOW, BUT IT FEEDS TWO THINGS.
    *
@@ -448,6 +482,27 @@ function AppConnectionPage() {
    * way in demonstrably drew a row for. Falling through to the `user-oauth` branch instead is no
    * better: its title and summary are the catalogue's, and there is none.
    */
+  /*
+   * AN APP THAT CAN ONLY HOLD A SHARED ACCOUNT, NOT YET MADE SHARED. It signs in with this
+   * deployment's own client, so there is no account here that is this person's: the server refuses
+   * a personal Connect, and this page draws none. Read off the listing's `sharedOnly`, never off the
+   * app's name. The list on the way in leaves it out; a link from elsewhere still lands here.
+   */
+  if (brokered && server?.sharedOnly) {
+    return (
+      <PageShell
+        backButton={back}
+        description="You don't connect this app yourself."
+        title={server.title}
+      >
+        <PageEmpty icon={IconUsers} title="Shared account only">
+          An admin connects {server.title} once as a shared account and gives it
+          to Bots.
+        </PageEmpty>
+      </PageShell>
+    );
+  }
+
   if (brokered && server) {
     /* Bound once because the row below is told it twice — once inside the whole disconnected
        sentence and once on its own — and two copies of it would drift. */
@@ -466,7 +521,7 @@ function AppConnectionPage() {
         title={server.title}
       >
         {notice ? (
-          <p className="text-destructive text-sm" role="alert">
+          <p className="break-words text-destructive text-sm" role="alert">
             {notice}
           </p>
         ) : null}
@@ -486,6 +541,9 @@ function AppConnectionPage() {
           <PageRows className="mt-0">
             <BrokeredAccountRow
               account={brokeredAccount}
+              edition={paths.edition}
+              reader="person"
+              startConnect={startConnect}
               /* Said beside the button rather than after it: disconnecting ends the account at
                  Composio, so what it undoes is not the row here but the grant on your own mailbox,
                  and connecting again is a fresh consent. */
@@ -520,18 +578,43 @@ function AppConnectionPage() {
    * administrator has not enabled cannot be consented to — there is no OAuth client behind it. Both
    * say which it is rather than drawing a switch that cannot work.
    */
-  if (entry?.auth !== "user-oauth") {
+  /*
+   * A server added by its address has no catalogue entry, so the page reads the same three facts off
+   * the server: its name, where it lives, and whether each person signs in to it.
+   */
+  const app =
+    entry ??
+    (server?.provenance === "custom"
+      ? {
+          title: server.title,
+          vendor: hostOf(server.url),
+          summary: "",
+          auth: server.signIn ? ("user-oauth" as const) : ("none" as const),
+        }
+      : undefined);
+
+  if (app && server?.provenance === "custom" && app.auth !== "user-oauth") {
+    return (
+      <PageShell backButton={back} title={app.title}>
+        <PageEmpty icon={IconPlug} title="No account needed">
+          {`Bots use ${app.title} as it is, the same for everybody. It's at ${app.vendor}.`}
+        </PageEmpty>
+      </PageShell>
+    );
+  }
+
+  if (app?.auth !== "user-oauth") {
     return (
       <PageShell
         backButton={back}
         description="You don't connect this app yourself."
-        title={entry?.title ?? key}
+        title={app?.title ?? key}
       >
         <PageEmpty
-          icon={entry ? IconUsers : IconAppsOff}
-          title={entry ? "Shared account" : "App not found"}
+          icon={app ? IconUsers : IconAppsOff}
+          title={app ? "Shared account" : "App not found"}
         >
-          {entry
+          {app
             ? "Bots use one shared account for this app, the same for everybody."
             : "OpenBot has no app by that name."}
         </PageEmpty>
@@ -542,11 +625,11 @@ function AppConnectionPage() {
   return (
     <PageShell
       backButton={back}
-      description={entry.summary}
-      title={entry.title}
+      description={app.summary || undefined}
+      title={app.title}
     >
       {notice ? (
-        <p className="text-destructive text-sm" role="alert">
+        <p className="break-words text-destructive text-sm" role="alert">
           {notice}
         </p>
       ) : null}
@@ -564,7 +647,7 @@ function AppConnectionPage() {
                   ? "Not available yet. An admin has to turn this on first."
                   : connection
                     ? "Bots you allow use this as you, and see only what you can see."
-                    : `No Bot can use this as you. Connecting takes you to ${entry.vendor} to approve access.`}
+                    : `No Bot can use this as you. Connecting takes you to ${app.vendor} to approve access.`}
               </ItemDescription>
             </ItemContent>
             <ItemActions>
@@ -606,34 +689,37 @@ function AppConnectionPage() {
                          * had not, which is the one outcome worse than not offering it.
                          */
                         setNotice(
-                          `You can't disconnect here yet. To stop access now, remove OpenBot in your ${entry.vendor} account's third-party access settings.`,
+                          `You can't disconnect here yet. To stop access now, remove OpenBot in your ${app.vendor} account's third-party access settings.`,
                         )
                       }
                       className="whitespace-nowrap"
                       variant="destructive"
                     >
-                      Disconnect your {entry.title} account
+                      Disconnect your {app.title} account
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
               ) : (
-                /*
-                 * The arrow says this leaves OpenBot. It does: the next thing on screen is the
-                 * vendor's own consent page, and a control that navigates away should look like one.
-                 */
-                <Button
-                  disabled={!enabled || connect.isPending}
-                  onClick={() => {
-                    setNotice(null);
-                    connect.mutate(key);
-                  }}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Connect
-                  <IconArrowUpRight />
-                </Button>
+                <>
+                  {enabled ? <NotConnected /> : null}
+                  {/*
+                   * The arrow says this leaves OpenBot. It does: the next thing on screen is the
+                   * vendor's own consent page, and a control that navigates away should look like one.
+                   */}
+                  <Button
+                    disabled={!enabled || connect.isPending}
+                    onClick={() => {
+                      setNotice(null);
+                      connect.mutate(key);
+                    }}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Connect
+                    <IconArrowUpRight />
+                  </Button>
+                </>
               )}
             </ItemActions>
           </Item>
@@ -642,7 +728,7 @@ function AppConnectionPage() {
 
       {connection ? (
         <PageSection
-          description={`Review the permissions recorded by ${entry.vendor}. They may include fewer permissions than OpenBot requested.`}
+          description={`Review the permissions recorded by ${app.vendor}. They may include fewer permissions than OpenBot requested.`}
           title="Access"
         >
           <PageRows>
@@ -650,7 +736,7 @@ function AppConnectionPage() {
               <ItemContent>
                 <ItemTitle>Allowed</ItemTitle>
                 <ItemDescription className="line-clamp-none">
-                  {connection.scope || `${entry.vendor} didn't say.`}
+                  {connection.scope || `${app.vendor} didn't say.`}
                 </ItemDescription>
               </ItemContent>
             </Item>
@@ -670,4 +756,12 @@ function AppConnectionPage() {
       ) : null}
     </PageShell>
   );
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }

@@ -9,10 +9,28 @@ import {
   type Tool,
   type ToolCall,
 } from "@ag-ui/client";
+import { NOT_RUN_AFTER_FAILURE } from "@openbot/shared/approval-outcomes";
+import { isDecisionTool } from "@openbot/shared/decision-tools";
+import { HARNESS_OWN_TOOLS } from "@openbot/shared/harness-own-tools";
+import {
+  calledTooEarly,
+  drawnTooEarlyAnswer,
+  isComputerCall,
+} from "@openbot/shared/tool-steps";
 import { OPENBOT_WAITING_METADATA } from "@openbot/shared/waiting";
 import { Observable, type Subscription } from "rxjs";
 import { withApprovalContext } from "./continuation";
 import type { AuditInitiator } from "./initiator";
+
+/**
+ * What a person reads when a Bot's stream ends with neither an answer nor an error.
+ *
+ * It used to read "Remote agent ended without a terminal event.", in red under the message: seen on
+ * OpenBot Desktop when the LangGraph harness died on a provider's refusal it did not catch. The
+ * harness now ends every run with an error of its own, so this is for a Bot that still does not.
+ */
+export const RUN_ENDED_EARLY =
+  "The Bot stopped before it finished answering. Try again.";
 
 /** Client tools supplied by OpenBot when the caller has no browser. */
 export type HeadlessTool = {
@@ -27,6 +45,12 @@ export type HeadlessTool = {
    * a time, in order, because a browser's clicks and typing depend on the page the last one left.
    */
   concurrent?: boolean;
+  /**
+   * Draws a component in the conversation, as the gallery's do. One asked for in the same step as
+   * any other kind of call is answered as drawn too early and not recorded; see
+   * `shared/tool-steps.ts`.
+   */
+  component?: boolean;
   execute(
     args: unknown,
     context: { toolCallId: string; signal: AbortSignal },
@@ -150,10 +174,7 @@ export class HeadlessToolsMiddleware extends Middleware {
             });
           });
           if (subscriber.closed || failed) return;
-          if (!terminal)
-            throw new Error(
-              "The headless agent ended without a terminal event.",
-            );
+          if (!terminal) throw new Error(RUN_ENDED_EARLY);
           const answered = new Set(
             messages.flatMap((message) =>
               message.role === "tool" ? [message.toolCallId] : [],
@@ -176,7 +197,24 @@ export class HeadlessToolsMiddleware extends Middleware {
               (call.function.name.startsWith("computer_") &&
                 !callerOffers.has(call.function.name)),
           );
+          /*
+           * A call the harness runs itself, which it has yet to reach. It is answered in the
+           * harness's next run, once this side's results come back, so it never ends the turn for
+           * the caller, who has nothing to answer it with. See `HARNESS_OWN_TOOLS`.
+           */
+          const forTheCaller = pending.filter(
+            (call) =>
+              !owned.includes(call) &&
+              !HARNESS_OWN_TOOLS.has(call.function.name),
+          );
           if (owned.length === 0) {
+            // Ended on its own call with nothing for anyone else to answer: nobody will.
+            if (
+              pending.length > 0 &&
+              forTheCaller.length === 0 &&
+              terminal.outcome?.type !== "interrupt"
+            )
+              throw new Error(RUN_ENDED_EARLY);
             subscriber.next(terminal);
             return;
           }
@@ -224,19 +262,45 @@ export class HeadlessToolsMiddleware extends Middleware {
             started.catch(() => undefined);
             early.set(call.id, started);
           }
+          /*
+           * A step's rules (`shared/tool-steps.ts`): a component asked for beside another kind of
+           * call is not recorded, and a computer action after one that failed in its step is not
+           * run. Both are answered, so every call still has its answer.
+           */
+          const isComponent = (name: string) =>
+            tools.get(name)?.component === true || isDecisionTool(name);
+          const failedSteps = new Set<string>();
           for (const call of owned) {
             if (subscriber.closed) return;
             executed.add(call.id);
             let content: string;
             let error: string | undefined;
+            const step = stepIdOf(messages, call.id);
+            const computer = isComputerCall(call.function.name);
+            const refusal = early.has(call.id)
+              ? undefined
+              : tools.get(call.function.name)?.component &&
+                  calledTooEarly(messages, call.id, isComponent)
+                ? drawnTooEarlyAnswer(call.function.name)
+                : computer && step !== undefined && failedSteps.has(step)
+                  ? NOT_RUN_AFTER_FAILURE
+                  : undefined;
             try {
-              const result = await (early.get(call.id) ?? run(call, messages));
-              content =
-                typeof result === "string" ? result : JSON.stringify(result);
-              if (content === undefined)
-                throw new Error(
-                  `The tool ${call.function.name} returned no result.`,
-                );
+              if (refusal !== undefined) {
+                content = refusal;
+                error = refusal;
+              } else {
+                const result = await (early.get(call.id) ??
+                  run(call, messages));
+                content =
+                  typeof result === "string" ? result : JSON.stringify(result);
+                if (content === undefined)
+                  throw new Error(
+                    `The tool ${call.function.name} returned no result.`,
+                  );
+                if (computer && step !== undefined && failedOutcome(result))
+                  failedSteps.add(step);
+              }
             } catch (failure) {
               if (failure instanceof HeadlessToolSuspension) {
                 failure.waiting.continuation ??= {
@@ -280,6 +344,7 @@ export class HeadlessToolsMiddleware extends Middleware {
               error =
                 failure instanceof Error ? failure.message : String(failure);
               content = JSON.stringify({ ok: false, error });
+              if (computer && step !== undefined) failedSteps.add(step);
             }
             if (subscriber.closed) return;
             const message: Message = {
@@ -308,7 +373,7 @@ export class HeadlessToolsMiddleware extends Middleware {
           const unresolved = interrupts.filter(
             (interrupt) => !results.has(interrupt.toolCallId ?? interrupt.id),
           );
-          if (owned.length !== pending.length || unresolved.length > 0) {
+          if (forTheCaller.length > 0 || unresolved.length > 0) {
             subscriber.next(
               unresolved.length > 0
                 ? {
@@ -353,6 +418,27 @@ export class HeadlessToolsMiddleware extends Middleware {
       };
     });
   }
+}
+
+/** The id of the assistant message, the step, that holds this call. */
+function stepIdOf(
+  messages: readonly Message[],
+  toolCallId: string,
+): string | undefined {
+  return messages.find(
+    (message) =>
+      message.role === "assistant" &&
+      message.toolCalls?.some((call) => call.id === toolCallId),
+  )?.id;
+}
+
+/** Whether a computer action answered that it did not work: refused, failed, or not carried out. */
+function failedOutcome(result: unknown): boolean {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    (result as { ok?: unknown }).ok === false
+  );
 }
 
 /** AG-UI accumulation reads transport history, so seed each continuation explicitly. */

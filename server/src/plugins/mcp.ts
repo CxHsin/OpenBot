@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { cutAtCodeUnits } from "../channels/text";
+import { transientFailure } from "./transient";
 
 /**
  * The only place in this deployment that speaks MCP to somebody else's server.
@@ -211,6 +212,13 @@ export type ListedTool = McpTool & {
   /** Whether the vendor marked it as destroying something. */
   destructive?: boolean;
   /**
+   * A broker listed it and said nothing about what it does: no read-only, destructive, create or
+   * update label from Composio, no behaviour flag from Arcade. Recorded as a write that is not
+   * destructive, and kept apart so a background read treats it as cautiously as a destructive one.
+   * An MCP server's silence is a null `effect` instead, which its reviewed lists decide.
+   */
+  unclassified?: boolean;
+  /**
    * Whether the server marked it read-only (`annotations.readOnlyHint`), recorded as said.
    *
    * NOT AN EFFECT, and never folded into `effect`: that field decides whether chat asks first, and
@@ -224,7 +232,15 @@ export type ListedTool = McpTool & {
 };
 
 export class McpServerError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /**
+     * Whether what failed passes (a timeout, a 429, the server's own 5xx), so a read may be tried
+     * again. Decided from the transport's error before it is flattened into the sentence above, which
+     * keeps only some statuses. See `./transient`.
+     */
+    readonly transient = false,
+  ) {
     super(message);
     this.name = "McpServerError";
   }
@@ -383,7 +399,7 @@ async function withClient<T>(
     // Rewrapped so a caller never has to care whether the failure came from the transport, the
     // handshake or the call, and so the message that reaches an audit row and an admin page is one
     // sentence rather than a stack.
-    throw new McpServerError(vendorFailure(error));
+    throw new McpServerError(vendorFailure(error), transientFailure(error));
   } finally {
     await client.close().catch(() => {
       // A server that will not say goodbye is not a failure of the work that just succeeded.

@@ -13,6 +13,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { agents, credentials, users } from "./core";
 import { jsonb } from "./json";
+import type { RemoteOAuthConfig } from "./remote-oauth-config";
 
 const createdAt = () =>
   timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
@@ -155,6 +156,14 @@ export const mcpServers = pgTable(
      * one credential the deployment holds for it, as every server added by URL always was.
      */
     entraScope: text("entra_scope"),
+    /**
+     * How a server added by URL signs each person in, when it answered OpenBot with an OAuth
+     * challenge (the MCP authorization spec): its authorization server's metadata, the resource to
+     * ask a token for, and the scope it named. Set, the server is reached as the person asking, on
+     * their own token; null, it is reached on its own key or with nothing. Discovered when the
+     * server is added and never taken from a request. See `plugins/remote-oauth.ts`.
+     */
+    oauth: jsonb("oauth").$type<RemoteOAuthConfig>(),
     /** What the deployment last heard back from it. `null` until the first successful listing. */
     toolsRefreshedAt: timestamp("tools_refreshed_at", { withTimezone: true }),
     /** The last failure, kept so the Plugins page can say why a server has no tools. */
@@ -167,6 +176,19 @@ export const mcpServers = pgTable(
      * writes nothing here.
      */
     skippedTools: text("skipped_tools").array(),
+    /**
+     * Which reading of a vendor's listing recorded this app's tools: `LISTING_REVISION` in
+     * `plugins/plugin-store/model.ts` as of the refresh that stored them, 0 for rows stored before
+     * this column existed.
+     *
+     * What OpenBot records from a listing can change between releases while the vendor's answer
+     * does not: #1177 started recording a broker's silence as `unclassified`, where Arcade's had been
+     * recorded as `destructive`. Nothing stored tells those rows apart from an action the vendor did
+     * flag, so they are listed again instead. At each start, every app of the active broker whose
+     * revision is behind is refreshed once (`relistOutdatedBrokeredApps`), so an upgraded install
+     * records what a fresh one would, with nobody pressing Refresh tools.
+     */
+    listingRevision: integer("listing_revision").notNull().default(0),
     addedBy: text("added_by"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -271,6 +293,22 @@ export const mcpTools = pgTable(
      * an approver to click through the colour.
      */
     destructive: boolean("destructive").notNull().default(false),
+    /**
+     * A broker listed this action and said nothing about what it does: Composio gave it no
+     * read-only, destructive, create or update label, or Arcade no behaviour flag it could read.
+     *
+     * Kept apart from {@link mcpTools.destructive}, which stays the vendor's own word. That word
+     * makes a call always ask and draws "destroys things" on a Bot's page, and nobody said it here.
+     * {@link mcpTools.effect} is `write`, so chat treats it as any change. A check-in, a task's
+     * trusted read and a memory source treat it as cautiously as a destructive action (see
+     * `mightDestroy` in `plugins/catalogue.ts`). An MCP server's silence is a null `effect`
+     * instead, which its reviewed lists decide, so this stays `false` for MCP rows.
+     *
+     * `false` for rows listed before this column existed. Arcade recorded such an action as
+     * destructive then, which asks every time. Such an app is listed again at the next start, which
+     * records it here (see {@link mcpServers.listingRevision}).
+     */
+    unclassified: boolean("unclassified").notNull().default(false),
     /**
      * Whether the server marked this action read-only (MCP `readOnlyHint`), as it said it.
      *
@@ -529,6 +567,67 @@ export const brokeredConnections = pgTable(
       .on(table.provider, table.app)
       .where(sql`${table.holder} = 'deployment'`),
     index("brokered_connections_user_idx").on(table.userId),
+  ],
+);
+
+/**
+ * Each account a person holds at one brokered app, when they hold more than the one.
+ *
+ * `brokered_connections` says a person has an app connected and stays one row per person per app.
+ * This table says WHICH accounts stand behind that row: two Gmail mailboxes, a work and a personal
+ * calendar. It is a record of what the broker last listed for the person, rebuilt from the vendor's
+ * own listing whenever the app's page loads (`syncBrokeredAccounts`), so a row here is never the
+ * only evidence that an account exists.
+ *
+ * `vendor_user_id` IS WHO THE ACCOUNT IS FILED UNDER AT THE BROKER, and `account_id` IS WHICH OF
+ * THEIR ACCOUNTS IT IS. Composio files every account a person holds under one user id and tells them
+ * apart by a connected account id, which a call passes to pick one. Arcade keeps one account per user
+ * id and provider, so a person's second account there is filed under a second user id of theirs
+ * (`<their id>~<suffix>`) and `account_id` is empty. A call reads both off the row it picked.
+ *
+ * `user_id` IS ALWAYS A PERSON. A Shared app's team account is one account and lives only in
+ * `brokered_connections`. No key to `users`, for the reason `brokered_connections.user_id` has none.
+ *
+ * `identity` IS WHAT THE VENDOR SAYS THE ACCOUNT IS — the mailbox address, the login — and is what a
+ * person and a model name the account by. Null where the vendor published none.
+ *
+ * `is_default` MARKS THE ACCOUNT A CALL USES WHEN IT NAMES NONE. The first one listed is the default
+ * until the person picks another; a partial unique index holds it to at most one per person per app.
+ */
+export const brokeredAccounts = pgTable(
+  "brokered_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    provider: text("provider").$type<"composio" | "arcade">().notNull(),
+    app: text("app").notNull(),
+    userId: text("user_id").notNull(),
+    vendorUserId: text("vendor_user_id").notNull(),
+    /** The vendor's id for the account, or the empty string where the user id alone names it. */
+    accountId: text("account_id").notNull().default(""),
+    identity: text("identity"),
+    isDefault: boolean("is_default").notNull().default(false),
+    /** When the vendor says the account was made, where it says. */
+    connectedAt: timestamp("connected_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    check(
+      "brokered_accounts_provider_check",
+      sql`${table.provider} IN ('composio', 'arcade')`,
+    ),
+    uniqueIndex("brokered_accounts_account_idx").on(
+      table.provider,
+      table.app,
+      table.userId,
+      table.vendorUserId,
+      table.accountId,
+    ),
+    uniqueIndex("brokered_accounts_default_idx")
+      .on(table.provider, table.app, table.userId)
+      .where(sql`${table.isDefault}`),
+    index("brokered_accounts_user_idx").on(table.userId),
   ],
 );
 

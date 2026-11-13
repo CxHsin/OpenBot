@@ -154,19 +154,19 @@ test("a composer with a channel offers a file picker behind the plus button", ()
  * silent drop is what says they are not; the text file is one that WOULD upload, so its absence
  * from `uploads` is what says nothing was sent.
  */
-test("a composer with no channel keeps the button that says so, and takes no files", async () => {
+test("a composer with no channel has no attach control, and takes no files", async () => {
   const view = render(<Composer compact onSubmit={() => {}} />);
   const { container, getByLabelText, queryByLabelText, rerender } = view;
   const form = () => container.querySelector("form") as HTMLFormElement;
 
-  // The old affordance, untouched: nothing to offer and it says so, rather than a live button
-  // that would open a picker with nowhere to upload to.
-  const placeholder = getByLabelText(
-    "More message options unavailable",
-  ) as HTMLButtonElement;
-  expect(placeholder.disabled).toBe(true);
+  // Nothing to attach to, and nothing else behind a plus, so there is no plus: not a live button
+  // that would open a picker with nowhere to upload to, and not a disabled one that explains nothing.
+  expect(queryByLabelText("More message options unavailable")).toBeNull();
   expect(queryByLabelText("Attach a file")).toBeNull();
+  expect(container.querySelector('[data-slot="composer-attach"]')).toBeNull();
   expect(container.querySelector('input[type="file"]')).toBeNull();
+  // The rest of the toolbar is still there.
+  expect(getByLabelText("Message")).toBeDefined();
 
   /*
    * THE DROP IS CAUGHT AND ANSWERED, WHICH INVERTS WHAT THESE TWO LINES USED TO PIN.
@@ -224,6 +224,63 @@ test("a dropped file the screen refuses says why, in our words", async () => {
   // machine wording, and no upload of a file we had already decided against.
   expect(alert.textContent).not.toContain("Supported types:");
   expect(uploads).toEqual([]);
+});
+
+/**
+ * A screenshot dragged onto a conversation: the chip with its preview, and the upload that carries
+ * the image to the Bot. OpenBot Desktop dropped exactly this on the floor while Tauri's own
+ * drag-and-drop handler took the file (see `dragDropEnabled` in `desktop/src-tauri/tauri.conf.json`
+ * and `main_window_leaves_dropped_files_to_the_page`); this pins the page's half of that path.
+ */
+test("a dropped screenshot shows its preview and goes up to the conversation", async () => {
+  serverSniffs("image/png");
+  const screenshot = new File(
+    [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+    "Screenshot 2026-11-09 at 14.20.00.png",
+    { type: "image/png" },
+  );
+  const view = render(
+    <Composer channelId="channel-1" compact onSubmit={() => {}} />,
+  );
+
+  drop(view.container.querySelector("form") as HTMLFormElement, [screenshot]);
+  await uploaded(view, screenshot.name);
+
+  expect(uploads).toEqual([
+    { path: "/api/channels/channel-1/attachments", name: screenshot.name },
+  ]);
+  expect(view.container.querySelector("img")).not.toBeNull();
+  expect(view.container.querySelector('[role="alert"]')).toBeNull();
+});
+
+/**
+ * A drag that announced files and handed over none (the webview could not read what was dragged)
+ * used to stage an empty list: no chip, no refusal, nothing. It says so now.
+ */
+test("a drop that carries files the page cannot read says so instead of doing nothing", async () => {
+  const { container, findByRole } = render(
+    <Composer channelId="channel-1" compact onSubmit={() => {}} />,
+  );
+
+  drop(container.querySelector("form") as HTMLFormElement, []);
+
+  const alert = await findByRole("alert");
+  expect(alert.textContent).toContain("Dropped file");
+  expect(alert.textContent).toContain("Attach it with +");
+  expect(uploads).toEqual([]);
+});
+
+test("a drag carrying no file at all is not answered with a refusal", async () => {
+  const { container } = render(
+    <Composer channelId="channel-1" compact onSubmit={() => {}} />,
+  );
+
+  fireEvent.drop(container.querySelector("form") as HTMLFormElement, {
+    dataTransfer: { files: [], items: [], types: ["text/plain"] },
+  });
+  await settleReactWork();
+
+  expect(container.querySelector('[role="alert"]')).toBeNull();
 });
 
 test("a text file the screen accepts is not refused a second time by the SDK", async () => {

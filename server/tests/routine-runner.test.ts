@@ -82,6 +82,15 @@ function harness(options: {
 
   const routineStore: RoutineStore = {
     create: () => unreachable("create"),
+    conversationFor: () => unreachable("conversationFor"),
+    linkGoal: () => unreachable("linkGoal"),
+    startManualRun: () => unreachable("startManualRun"),
+    listRuns: () => unreachable("listRuns"),
+    routineForFiring: () => unreachable("routineForFiring"),
+    reapAbandonedRuns: () => unreachable("reapAbandonedRuns"),
+    recordSweep: () => unreachable("recordSweep"),
+    lastSweptAt: () => unreachable("lastSweptAt"),
+    markUnschedulable: () => unreachable("markUnschedulable"),
     listFor: () => unreachable("listFor"),
     update: () => unreachable("update"),
     remove: () => unreachable("remove"),
@@ -115,8 +124,10 @@ function harness(options: {
   const channelStore: ChannelStore = {
     create: () => unreachable("channels.create"),
     list: () => unreachable("channels.list"),
+    search: () => unreachable("channels.search"),
     setPinned: () => unreachable("channels.setPinned"),
     markRead: () => unreachable("channels.markRead"),
+    rename: () => unreachable("channels.rename"),
     softDelete: () => unreachable("channels.softDelete"),
     direct: () => unreachable("channels.direct"),
     signalChannelBusy: () => unreachable("channels.signalChannelBusy"),
@@ -169,6 +180,11 @@ describe("createRoutineRunner", () => {
         ownerUserId: CONTEXT.ownerUserId,
         // Carried so the turn's audit rows say a routine ran this, not that the owner did.
         routineId: CONTEXT.routineId,
+        telemetry: {
+          trigger: "routine",
+          surface: "unknown",
+          rootTaskId: RUN_ID,
+        },
         agentId: CONTEXT.agentId,
         threadId: CHANNEL.threadId,
         instruction: CONTEXT.instruction,

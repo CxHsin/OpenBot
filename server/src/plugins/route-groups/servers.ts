@@ -1,11 +1,34 @@
+import {
+  mcpAddressRefusal,
+  normalizedServerAddress,
+  enterpriseControls,
+} from "../../admin/controls";
 import { requireAdmin } from "../../auth/guards";
 import { reasonWithoutStatement } from "../../db/query-failure";
+import { BROKERED_PROFILE } from "../access";
 import { brokerSentence, schemeKind } from "../broker";
-import { CATALOGUE } from "../catalogue";
+import {
+  CATALOGUE,
+  catalogueEntry,
+  customUrlRefusal,
+  offeredHere,
+  summaryFor,
+} from "../catalogue";
 import { vendorSentence } from "../composio";
 import { redirectUriFor } from "../oauth";
+import { ALWAYS_ON_REFUSAL, isAlwaysOn } from "../personal-defaults";
+import {
+  probeRemoteServer,
+  type RemoteOAuthConfig,
+  RemoteServerRefusedError,
+} from "../remote-oauth";
 import { asAccountMode } from "../shared-accounts";
 import { asSharedUseApproval, type SharedUseApproval } from "../shared-use";
+import {
+  BROKERED_ID_PREFIXES,
+  BROKERED_SCREEN_NAMES,
+  MEMORY_TOOLS_SERVER,
+} from "../plugin-store/model";
 import {
   CatalogueEntryUnknownError,
   CustomServerRefusedError,
@@ -29,13 +52,21 @@ export function mountServerRoutes({
   skillActor,
 }: PluginRouteContext) {
   /** Everything the Plugins page draws: the catalogue, what is added, and the skills. */
-  routes.get("/", requireUser, async (context) =>
-    context.json({
-      catalogue: CATALOGUE.map((entry) => ({
+  routes.get("/", requireUser, async (context) => {
+    const servers = await store.listServers();
+    const added = new Set(servers.map((server) => server.id));
+    return context.json({
+      /*
+       * What this edition offers, and anything already added whatever the edition: the personal
+       * edition leaves out the apps its broker carries too (`teamOnly`), but never one in use.
+       */
+      catalogue: CATALOGUE.filter(
+        (entry) => offeredHere(entry) || added.has(entry.key),
+      ).map((entry) => ({
         key: entry.key,
         title: entry.title,
         vendor: entry.vendor,
-        summary: entry.summary,
+        summary: summaryFor(entry),
         docsUrl: entry.docsUrl,
         /*
          * The kind, not the whole thing. The page needs to know what to ask an administrator for;
@@ -45,6 +76,16 @@ export function mountServerRoutes({
          */
         auth: entry.auth.kind,
         perInstance: entry.host === null,
+        /*
+         * Whether connecting needs nothing typed first: no account at all, or an OAuth vendor this
+         * deployment registers itself with. The personal edition lists only these on Connections.
+         */
+        oneStep:
+          entry.host !== null &&
+          (entry.auth.kind === "none" ||
+            entry.auth.kind === "builtin" ||
+            (entry.auth.kind === "user-oauth" &&
+              entry.auth.clientRegistration === "dynamic")),
       })),
       /*
        * Whether a Bot with no credential of its own can still call a tool back.
@@ -104,7 +145,7 @@ export function mountServerRoutes({
        * the name this page shows and the parser those routes use cannot come apart.
        */
       provider: activeProvider,
-      servers: await store.listServers(),
+      servers,
       // Scoped: the deployment's skills plus this person's own. An administrator sees them all.
       skills: await store.listSkills(skillActor(context)),
       /*
@@ -119,8 +160,8 @@ export function mountServerRoutes({
       redirectUri: connect?.publicUrl
         ? redirectUriFor(connect.publicUrl)
         : null,
-    }),
-  );
+    });
+  });
 
   /** Add a curated server. The URL comes from the catalogue, never from the request. */
   routes.post("/servers", requireUser, async (context) => {
@@ -195,6 +236,179 @@ export function mountServerRoutes({
        * sentence or "That did not work" depending on which button was pressed, which is the shape
        * that made this class hard to see the first time.
        */
+      if (isDeploymentFault(error)) {
+        return context.json({ error: deploymentFaultSentence(error) }, 409);
+      }
+      throw error;
+    }
+  });
+
+  /**
+   * Add an MCP server by its address, from Connections: the person-facing way in.
+   *
+   * Anybody signed in, unlike the admin's `/servers/custom` below, because what it adds is held to
+   * three things that route leaves to the admin's judgement. The address is held to the same floor.
+   * The admin's MCP allowlist decides whether the address may be added at all, where it is on. And
+   * the server itself says how it is reached: OpenBot asks it, with no credential, and an OAuth
+   * challenge makes it a server each person signs in to (`remote-oauth.ts`), a plain answer makes it
+   * one that needs nothing, and a refusal with no sign-in makes it one that needs a key.
+   *
+   * A key is the one thing a person types here that every Bot using the server then uses, so in the
+   * team edition only an admin may give one. In the personal edition the one person is the admin.
+   */
+  routes.post("/servers/by-url", requireUser, async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      title?: unknown;
+      url?: unknown;
+      token?: unknown;
+    } | null;
+    const title = typeof body?.title === "string" ? body.title.trim() : "";
+    const url = typeof body?.url === "string" ? body.url.trim() : "";
+    const token = typeof body?.token === "string" ? body.token.trim() : "";
+    if (!title || !url) {
+      return context.json(
+        { error: "Give the server a name and an address." },
+        400,
+      );
+    }
+    if (title.length > 60) {
+      return context.json({ error: "Keep the name under 60 characters." }, 400);
+    }
+    const refusal = customUrlRefusal(url);
+    if (refusal)
+      return context.json({ error: addressRefusalFor(refusal) }, 400);
+
+    const isAdmin = context.var.actor.role === "admin";
+    if (token && !isAdmin) {
+      return context.json(
+        {
+          error:
+            "Every Bot that uses this server would use that key, so only an admin can add one. Ask an admin to add it.",
+        },
+        403,
+      );
+    }
+
+    const notApproved = mcpAddressRefusal(url);
+    if (notApproved) {
+      return context.json(
+        {
+          error: isAdmin
+            ? "The MCP allowlist is on, and this server isn't on it. Approve it to add it."
+            : notApproved,
+          code: "not-approved",
+          canApprove: isAdmin,
+        },
+        403,
+      );
+    }
+
+    const servers = await store.listServers();
+    const address = normalizedServerAddress(url);
+    const already = servers.find(
+      (server) => normalizedServerAddress(server.url) === address,
+    );
+    if (already) {
+      return context.json(
+        {
+          error: `That server is already here, as ${already.title}.`,
+          serverId: already.id,
+        },
+        409,
+      );
+    }
+    const id = serverIdFor(title, new Set(servers.map((server) => server.id)));
+
+    let oauth: RemoteOAuthConfig | undefined;
+    if (!token) {
+      let probe: Awaited<ReturnType<typeof probeRemoteServer>>;
+      try {
+        probe = await probeRemoteServer(url);
+      } catch (error) {
+        if (error instanceof RemoteServerRefusedError) {
+          return context.json({ error: error.message }, 400);
+        }
+        throw error;
+      }
+      if (probe.kind === "key") {
+        return context.json(
+          {
+            error: `${title} needs a key to connect. Add the key it gave you and try again.`,
+            code: "needs-key",
+          },
+          400,
+        );
+      }
+      if (probe.kind === "oauth") oauth = probe.config;
+    }
+
+    try {
+      const credentialId = token
+        ? await store.storeServerKey({ serverId: id, token })
+        : undefined;
+      let server = await store.addCustomServer({
+        id,
+        title,
+        url,
+        ...(credentialId ? { credentialId } : {}),
+        ...(oauth ? { oauth } : { oauth: null }),
+        by: actorEmail(context),
+        actorId: context.var.actor.id,
+      });
+      /*
+       * A server that is reached right away and listed nothing, with an error, was not really added:
+       * the key was refused, or the address answered something other than MCP. It is taken back out,
+       * so the person can correct what they typed and add it again, and is told what the server said.
+       */
+      /*
+       * A server that signs people in is introduced to now, rather than at the first Connect: OpenBot
+       * registers itself with its authorization server, and a server that only accepts apps it has
+       * approved says so here, while the person is still on the form, instead of leaving a server
+       * nobody can ever connect.
+       */
+      if (oauth) {
+        let registered: unknown = null;
+        let refusedWith: string | null = null;
+        try {
+          registered = await store.ensureOAuthClient(id, actorEmail(context));
+        } catch (error) {
+          if (!(error instanceof RemoteServerRefusedError)) throw error;
+          refusedWith = error.message;
+        }
+        if (!registered) {
+          await store.removeServer(id, actorEmail(context));
+          return context.json(
+            {
+              error:
+                refusedWith ??
+                (connect?.publicUrl
+                  ? `Couldn't set up signing in to ${title}. Try again in a moment.`
+                  : "Signing in to a server isn't set up yet. Set OPENBOT_PUBLIC_URL."),
+            },
+            400,
+          );
+        }
+      }
+      if (!oauth && server.tools.length === 0 && server.lastError) {
+        const reason = server.lastError;
+        await store.removeServer(id, actorEmail(context));
+        return context.json(
+          { error: `Couldn't connect to ${title}. ${reason}` },
+          400,
+        );
+      }
+      await enterpriseControls()?.refresh();
+      // Reread, so the answer carries what the refresh above may have changed.
+      server =
+        (await store.listServers()).find((row) => row.id === id) ?? server;
+      return context.json({ server, signIn: Boolean(oauth) });
+    } catch (error) {
+      if (
+        error instanceof CustomServerRefusedError ||
+        error instanceof CatalogueEntryUnknownError
+      ) {
+        return context.json({ error: error.message }, 400);
+      }
       if (isDeploymentFault(error)) {
         return context.json({ error: deploymentFaultSentence(error) }, 409);
       }
@@ -392,6 +606,8 @@ export function mountServerRoutes({
     if (forbidden) return forbidden;
 
     const serverId = context.req.param("id");
+    if (isAlwaysOn(serverId))
+      return context.json({ error: ALWAYS_ON_REFUSAL }, 403);
     /*
      * READ BEFORE THE ROW GOES. The ask-before-write rule a Shared app was given lives in the
      * approval policy, not on the row, so nothing cascades it away; asked afterwards, the mode is
@@ -434,7 +650,7 @@ export function mountServerRoutes({
 
       const refusal = brokerRefusal(
         error,
-        `Removing this app did not finish, and neither this deployment nor ${activeVendor} said why, so the app is still here rather than gone with grants of its own left live at the vendor. Press Remove again: every account is withdrawn at ${activeVendor} before anything here is deleted, so repeating it is safe and asks only for what is left. Check this deployment's ${activeVendor} key if it persists.`,
+        `Couldn't finish removing this app, and no reason was given. It's still here. Press Remove again. It's safe to repeat. Check ${BROKERED_PROFILE[activeProvider].envVar} if it keeps happening.`,
       );
       return context.json({ error: refusal.error }, refusal.status);
     }
@@ -593,4 +809,53 @@ export function mountServerRoutes({
       throw error;
     }
   });
+}
+
+/**
+ * The id a server added by URL is stored under, made from the name a person gave it: lower-case
+ * letters, numbers and hyphens, as `addCustomServer` requires. A name that would land on a catalogue
+ * entry, OpenBot's own memory tools, a screen or a broker's namespace is prefixed `mcp-` out of the
+ * way, and one already taken gets a number.
+ */
+export function serverIdFor(title: string, taken: ReadonlySet<string>): string {
+  let base = title
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 34)
+    .replace(/-+$/g, "");
+  if (base.length < 2) base = `mcp-${base || "server"}`.replace(/-+$/g, "");
+  const reserved = (id: string) =>
+    catalogueEntry(id) !== null ||
+    id === MEMORY_TOOLS_SERVER ||
+    // Connections has pages at these, beside each server's own `/connections/<id>`.
+    id === "new" ||
+    id === "browse" ||
+    BROKERED_SCREEN_NAMES.some(([screen]) => screen === id) ||
+    BROKERED_ID_PREFIXES.some(({ idPrefix }) => id.startsWith(idPrefix));
+  if (reserved(base)) base = `mcp-${base}`.slice(0, 34).replace(/-+$/g, "");
+  if (!taken.has(base)) return base;
+  for (let n = 2; n < 100; n += 1) {
+    const candidate = `${base}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now().toString(36)}`;
+}
+
+/**
+ * The address floor's refusal, in words for the person adding a server from Connections.
+ *
+ * `customUrlRefusal` is written for the admin's API ("this deployment", "token field"); this route is
+ * open to everybody, so each reason becomes the step they can take. Anything the floor adds later
+ * that is not mapped here gets the general sentence, never the admin one.
+ */
+export function addressRefusalFor(refusal: string): string {
+  if (refusal === "That is not a URL.")
+    return "Enter the full address, starting with https://.";
+  if (refusal === "An MCP server must be reached over https.")
+    return "Use the server's https address. OpenBot doesn't send your data over plain http.";
+  if (refusal.startsWith("Put the credential in the token field"))
+    return "Take the key out of the address and put it in the Key field.";
+  return "OpenBot can't reach that address. Use the server's public address, for example https://mcp.example.com/mcp.";
 }

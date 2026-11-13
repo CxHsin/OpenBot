@@ -1,24 +1,27 @@
 import {
   DEFAULT_USER_PREFERENCES,
-  isSkinId,
+  currentSkinId,
   type UserPreferences,
 } from "@openbot/shared/user-preferences";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./db/client";
 import { users } from "./db/schema";
 
 /*
  * What is stored, over the defaults. A skin a later build no longer ships stays in the row, so going
- * back to a build that has it brings it back, but this build answers with its default.
+ * back to a build that has it brings it back, but this build answers with its default. A skin saved
+ * under an id it has since been renamed from is answered with its new id.
  */
 function withDefaults(stored: Partial<UserPreferences>): UserPreferences {
   const preferences = { ...DEFAULT_USER_PREFERENCES, ...stored };
-  return isSkinId(preferences.skin)
-    ? preferences
-    : { ...preferences, skin: DEFAULT_USER_PREFERENCES.skin };
+  return {
+    ...preferences,
+    skin: currentSkinId(preferences.skin) ?? DEFAULT_USER_PREFERENCES.skin,
+  };
 }
 
 export type UserPreferencesStore = {
+  claimStarterTour: (userId: string, channelId: string) => Promise<void>;
   read: (userId: string) => Promise<UserPreferences>;
   patch: (
     userId: string,
@@ -30,6 +33,22 @@ export function createUserPreferencesStore(
   database: Database,
 ): UserPreferencesStore {
   return {
+    async claimStarterTour(userId, channelId) {
+      // PostgreSQL rechecks the condition after a concurrent row update. Only one
+      // new conversation can win, even across server processes; merge keeps other preferences.
+      await database
+        .update(users)
+        .set({
+          preferences: sql`${users.preferences} || ${{ starterTourChannelId: channelId }}::jsonb`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(users.id, userId),
+            sql`NOT (${users.preferences} ? 'starterTourChannelId')`,
+          ),
+        );
+    },
     async read(userId) {
       const [user] = await database
         .select({ preferences: users.preferences })

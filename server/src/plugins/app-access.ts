@@ -192,6 +192,12 @@ export type AppAccessFacts = {
   composioConfigured: boolean;
   /** The scheme the app's answering row records, for a brokered app. */
   authScheme: string | null;
+  /**
+   * How the broker's directory says a brokered app with no row connects. There is no recorded
+   * scheme until somebody turns the app on, and the personal edition's card reads `connect` to
+   * decide whether one press turns it on and opens its sign-in. Absent for an app with a row.
+   */
+  listedConnect?: AppConnect;
   accountMode: "personal" | "shared" | null;
   /** The catalogue entry's auth, for an app this deployment ships. */
   catalogueAuth: CatalogueEntry["auth"] | null;
@@ -229,11 +235,11 @@ export function accountOf(facts: AccountFacts): AppAccount {
     if (schemeKind(facts.authScheme) === "none") return "deployment";
     return facts.accountMode === "shared" ? "shared" : "personal";
   }
-  if (facts.provider === "catalogue")
-    return facts.catalogueAuth?.kind === "user-oauth"
-      ? "personal"
-      : "deployment";
-  return "deployment";
+  /*
+   * A catalogue vendor, or a server added by URL that signs each person in: either way the call runs
+   * on the asker's own grant when the auth says so.
+   */
+  return facts.catalogueAuth?.kind === "user-oauth" ? "personal" : "deployment";
 }
 
 /**
@@ -258,6 +264,7 @@ export function ownerGrantsOf(
 
 export function connectOf(facts: AppAccessFacts): AppConnect {
   if (brokeredProvenance(facts.provider)) {
+    if (!facts.present) return facts.listedConnect ?? null;
     const kind = schemeKind(facts.authScheme);
     return kind === "consent" || kind === "key" ? kind : null;
   }

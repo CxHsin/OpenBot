@@ -21,6 +21,7 @@
  * implementations of the same hard thing, one of which nobody tests.
  */
 
+import { untitledLine } from "@openbot/shared/conversation-title";
 import type { HeadlessWaiting } from "@openbot/toolkit/headless-tools";
 import {
   and,
@@ -33,17 +34,32 @@ import {
   isNull,
   lte,
   ne,
+  or,
   sql,
 } from "drizzle-orm";
+import {
+  conversationCalled,
+  conversationName,
+  ROSTER_ORDER,
+} from "../channels/routes";
+import { oneLine } from "../channels/text";
 import type { Database } from "../db/client";
 import {
   channelAgents,
   channelMemberships,
   channels,
+  intelligenceChannelMappings,
+  responsibilities,
   routineRuns,
   routineSweeps,
   routines,
 } from "../db/schema";
+import {
+  goalRoutinesLockKey,
+  goalShownFor,
+  instructionRunsGoal,
+  routineRunsGoal,
+} from "../responsibilities/types";
 import { describeCron, nextOccurrence, ScheduleRefusedError } from "./schedule";
 
 const SWEEP_ID = "routines";
@@ -57,16 +73,29 @@ export class RoutineNotFoundError extends Error {
 
 /** The floor, the cap, a bad zone, a channel that is not the caller's. Carries the sentence verbatim. */
 export class RoutineRefusedError extends Error {
-  constructor(message: string) {
+  /**
+   * Which refusal this is, for the ones whose sentence is written for a model. The HTTP routes
+   * switch on it to say the same thing to a person; the message stays as the Bot's tools read it.
+   */
+  readonly code?: RoutineRefusalCode;
+  constructor(message: string, code?: RoutineRefusalCode) {
     super(message);
     this.name = "RoutineRefusedError";
+    this.code = code;
   }
 }
+
+export type RoutineRefusalCode =
+  | "goal_not_found"
+  | "goal_complete"
+  | "unknown_timezone";
 
 /** A person may keep this many routines switched on. A constant with a reason, not a setting. */
 export const MAX_ENABLED_ROUTINES = 20;
 /** Same code-point cap discipline as channel activity. */
 export const MAX_INSTRUCTION_CODE_POINTS = 2000;
+/** A name, not a second instruction: one line a row can show whole. */
+export const MAX_TITLE_CODE_POINTS = 100;
 /** Capped like audit payloads, because a failure is not a promise about length. */
 export const MAX_RUN_ERROR = 400;
 /**
@@ -79,15 +108,17 @@ export const MAX_RUN_ERROR = 400;
  */
 const FAILURE_SCAN_LIMIT = 20;
 
-const NO_SHARED_CHANNEL =
-  "I can only post into a channel you and I are both in.";
+/** Exported so the page's create can say it to a person rather than to a model. */
+export const NO_SHARED_CHANNEL =
+  "I can only post into a conversation you and I are both in.";
 const NO_CHANNEL_AT_ALL =
-  "We have no channel for me to post into. Start one and ask again.";
+  "We have no conversation for me to post into. Start one and ask again.";
 const INSTRUCTION_EMPTY = "A routine needs an instruction to carry out.";
 const INSTRUCTION_TOO_LONG = `An instruction can be at most ${MAX_INSTRUCTION_CODE_POINTS} characters.`;
+const TITLE_TOO_LONG = `A routine's title can be at most ${MAX_TITLE_CODE_POINTS} characters.`;
 const TOO_MANY_ENABLED = `You already have ${MAX_ENABLED_ROUTINES} routines switched on. Switch one off before adding another.`;
 
-/** How many names an ambiguity refusal reads out before it gives up and says "and others". */
+/** How many conversations a refusal reads out before it gives up and says "and others". */
 const MAX_NAMED_CHANNELS = 5;
 
 export type RoutineRunOutcome = "succeeded" | "failed" | "skipped" | "waiting";
@@ -98,6 +129,10 @@ export type Routine = {
   agentId: string;
   channelId: string;
   instruction: string;
+  /** What the person called it, or null when they named it nothing. */
+  title: string | null;
+  /** The goal it runs, when it was made for one or its firing ran one. See `routineRunsGoal`. */
+  goalId: string | null;
   cron: string;
   timezone: string;
   enabled: boolean;
@@ -111,6 +146,8 @@ export type RoutineSummary = {
   id: string;
   agentId: string;
   instruction: string;
+  /** What the person called it, or null when they named it nothing: then the instruction names it. */
+  title: string | null;
   /**
    * The schedule in words — "Weekdays at 09:00" — for the shapes `describeCron` recognizes, and
    * the raw five-field expression for everything else. Prose where prose is possible; never a
@@ -128,17 +165,47 @@ export type RoutineSummary = {
   channelId: string;
   /** The target channel's name, or null when the row is gone entirely rather than soft-deleted. */
   channelName: string | null;
+  /**
+   * The target conversation as the sidebar titles it, or null when the row is gone entirely. What
+   * a Bot names it by: the name is only its Bots' names, the same for every conversation with them.
+   */
+  channelTitle: string | null;
   /** Whether the target channel was deleted. A broken routine is shown, not hidden. */
   channelDeleted: boolean;
   /** The most recent firing, or null when it has never fired. */
   lastRun: { status: RoutineRunOutcome | null; finishedAt: Date | null } | null;
+  /**
+   * The goal it runs, or null when it runs none. Resolved by `routineRunsGoal`, the rule the goal
+   * store and Activity read, so a routine made before routines recorded their goal reports the one
+   * its instruction names, one not completed first (`goalShownFor`). The Routines page draws such a
+   * routine as a start of that goal's row.
+   */
+  goalId: string | null;
 };
 
 export type RoutineInput = {
   ownerUserId: string;
   agentId: string;
   channelId?: string;
+  /**
+   * The thread of the run that asked, when it ran in one.
+   *
+   * With no `channelId`, the routine posts into the conversation this thread belongs to, which is
+   * what "every morning, post the summary here" means. Never a channel by itself: it is checked
+   * against the owner's own threads, and a thread that is not one of theirs is ignored.
+   */
+  threadId?: string;
   instruction: string;
+  /**
+   * What the person called it, in their words. Absent or blank: the title of the goal it runs, and
+   * no title when it runs none.
+   */
+  title?: string;
+  /**
+   * The goal it runs, one of this Bot's for this owner that is not complete. Absent: the goal whose
+   * id the instruction names, if any. Never found from a title: see `routineRunsGoal`.
+   */
+  goalId?: string;
   cron: string;
   timezone?: string;
 };
@@ -151,6 +218,7 @@ export type RoutineInput = {
  * told whose they were would be a runner that could be told the wrong answer.
  */
 export type RoutineRunContext = {
+  source?: "schedule" | "run_now" | "trigger";
   routineId: string;
   ownerUserId: string;
   agentId: string;
@@ -176,6 +244,9 @@ export type RoutineRunSummary = {
 
 export type RoutinePatch = Partial<{
   instruction: string;
+  title: string;
+  /** Run this goal from now on, as `RoutineInput.goalId`. */
+  goalId: string;
   cron: string;
   timezone: string;
   channelId: string;
@@ -184,6 +255,16 @@ export type RoutinePatch = Partial<{
 
 export type RoutineStore = {
   create(input: RoutineInput): Promise<Routine>;
+  /**
+   * The conversation work for this owner and Bot posts into, by the rule `create` follows: the one
+   * named, when they share it; else the one the request was made in; else the only one they share.
+   * Refuses with the choices otherwise. A goal made in a conversation picks its conversation by it.
+   */
+  conversationFor(
+    ownerUserId: string,
+    agentId: string,
+    wanted: { channelId?: string; threadId?: string },
+  ): Promise<string>;
   listFor(ownerUserId: string): Promise<RoutineSummary[]>;
   update(
     ownerUserId: string,
@@ -191,6 +272,17 @@ export type RoutineStore = {
     patch: RoutinePatch,
   ): Promise<Routine>;
   remove(ownerUserId: string, id: string): Promise<void>;
+  /**
+   * Record that this routine runs this goal, when it records none yet: its firing ran the goal with
+   * `run_goal`. False when it is not this owner's and Bot's routine, already records a goal, or is an
+   * older routine whose instruction names a goal of its Bot that is not completed besides this one.
+   */
+  linkGoal(
+    ownerUserId: string,
+    agentId: string,
+    routineId: string,
+    goalId: string,
+  ): Promise<boolean>;
   setEnabled(ownerUserId: string, id: string, enabled: boolean): Promise<void>;
   /**
    * Run now (the page's Test): opens a run row for the owner's own enabled routine. Refused for a
@@ -287,6 +379,8 @@ function toRoutine(row: RoutineRow): Routine {
     agentId: row.agentId,
     channelId: row.channelId,
     instruction: row.instruction,
+    title: row.title,
+    goalId: row.goalId,
     cron: row.cron,
     timezone: row.timezone,
     enabled: row.enabled,
@@ -307,6 +401,19 @@ function validInstruction(instruction: string): string {
 }
 
 /**
+ * A title as one line, measured in code points like an instruction. Blank is no title, which the
+ * row stores as null so the instruction names the routine instead.
+ */
+function validTitle(title: string | undefined): string | null {
+  const line = title?.replace(/\s+/g, " ").trim() ?? "";
+  if (line.length === 0) return null;
+  if (Array.from(line).length > MAX_TITLE_CODE_POINTS) {
+    throw new RoutineRefusedError(TITLE_TOO_LONG);
+  }
+  return line;
+}
+
+/**
  * The schedule module owns both acceptance and the next occurrence, so its refusal sentence is the
  * one a person should read. It is carried through verbatim rather than reworded here: a model that
  * gets "Routines may run at most every 15 minutes" can propose a schedule that works, and a model
@@ -317,54 +424,91 @@ function nextRunFor(cron: string, timezone: string, after: Date): Date {
     return nextOccurrence(cron, timezone, after);
   } catch (error) {
     if (error instanceof ScheduleRefusedError) {
-      throw new RoutineRefusedError(error.message);
+      throw new RoutineRefusedError(
+        error.message,
+        error.code === "unknown_timezone" ? "unknown_timezone" : undefined,
+      );
     }
     throw error;
   }
 }
 
+/** One conversation a routine could post into, as much of it as naming it needs. */
+type Conversation = {
+  id: string;
+  summary: string | null;
+  opening: string | null;
+  lastMessage: string | null;
+};
+
+/** As long as a conversation's own title may be, so a preview standing in for one is no longer. */
+const MAX_TITLE_GRAPHEMES = 60;
+
 /**
- * "A", "A, B", or five names and "and others" — a sentence, not a list a client renders.
+ * A conversation as the sidebar names it: its title once it has one, the person's first words until
+ * then (the last thing said where nobody spoke first), and "New conversation" before anything was.
  *
- * A name alone is not always enough to ask by: a real account turned up six channels all named
- * "General Assistant" with the same Bot, and a refusal built from names alone read "General
- * Assistant, General Assistant, … and others" — circular, because the person cannot answer it and
- * the model cannot map an answer back to a channelId. So every candidate whose name is shared by
- * another candidate gets its full id appended in parentheses; the id is the one thing the model can
- * pass back as `channelId` when names cannot tell two channels apart, and a person pasting it back
- * is ugly but functional. A candidate with a unique name stays bare, so the common case — and the
- * sentence's length — is unaffected by a collision elsewhere in the list.
+ * The same rule as the sidebar row (`threadTitle` in app/src/components/app-sidebar/channel.tsx),
+ * read from the same columns, because the person picks from this list by recognising what they
+ * see in the sidebar. The channel's NAME is never used: it is only its Bots' names, which is how a
+ * real account came to be offered six conversations all called "General Assistant".
  */
-function nameThem(candidates: { id: string; name: string }[]): string {
-  const counts = new Map<string, number>();
-  for (const candidate of candidates) {
-    counts.set(candidate.name, (counts.get(candidate.name) ?? 0) + 1);
-  }
-  const labels = candidates.map((candidate) =>
-    (counts.get(candidate.name) ?? 0) > 1
-      ? `${candidate.name} (${candidate.id})`
-      : candidate.name,
-  );
-  if (labels.length <= MAX_NAMED_CHANNELS) return labels.join(", ");
-  return [...labels.slice(0, MAX_NAMED_CHANNELS), "and others"].join(", ");
+function conversationTitle(conversation: {
+  summary: string | null;
+  opening: string | null;
+  lastMessage: string | null;
+}): string {
+  const summary = conversation.summary?.trim();
+  if (summary) return oneLine(summary, MAX_TITLE_GRAPHEMES);
+  const untitled = untitledLine(conversation);
+  if (untitled) return oneLine(untitled, MAX_TITLE_GRAPHEMES);
+  return "New conversation";
+}
+
+/**
+ * Each conversation by its title and its id, the run's own one marked, then "and others" past five.
+ *
+ * The title is what the person recognises and the id is what the model passes back, so both go in
+ * every entry: two conversations can share a title ("New conversation" twice is ordinary), and a
+ * title alone would leave the model unable to tell which one was picked.
+ */
+function listThem(candidates: Conversation[], here: string | null): string {
+  const labels = candidates
+    .slice(0, MAX_NAMED_CHANNELS)
+    .map(
+      (candidate) =>
+        `"${conversationTitle(candidate)}" (${candidate.id === here ? "this conversation, " : ""}id: ${candidate.id})`,
+    );
+  if (candidates.length > MAX_NAMED_CHANNELS) labels.push("and others");
+  return labels.join(", ");
 }
 
 export function createRoutineStore(database: Database): RoutineStore {
   /**
    * Where the reply lands, decided here rather than at the tool boundary.
    *
-   * Discovery confirmed the conversation's own channel is not reachable at the tool layer, so a model
-   * asked to make a routine either names a channel or names nothing. Both are resolved against what
-   * the owner and this agent actually share, which is the only check that stops a routine posting
-   * one person's summary into another person's conversation.
+   * Three ways in, in this order. A channel the model named, checked against what the owner and this
+   * agent actually share, which is the only check that stops a routine posting one person's summary
+   * into another person's conversation. Then the conversation the request was made in, read off the
+   * run's own thread. Then, with no conversation to go on, the one channel they share, or a question.
+   *
+   * THE CONVERSATION USED NOT TO BE REACHABLE HERE, and that cost the obvious case. A person in one of
+   * seven conversations with General Assistant asked for a routine "here", the tool could see only
+   * the owner and the Bot, so the store saw seven candidates, refused, and the model put a picker in
+   * front of them labelled "General Assistant, channel 1" to "channel 5". The run always knew which
+   * conversation it was in; the store was simply never told.
    */
   async function resolveChannel(
     ownerUserId: string,
     agentId: string,
-    channelId?: string,
+    wanted: { channelId?: string; threadId?: string },
     handle: Database | Transaction = database,
   ): Promise<string> {
-    if (channelId !== undefined) {
+    const here = wanted.threadId
+      ? await conversationOf(ownerUserId, agentId, wanted.threadId, handle)
+      : null;
+
+    if (wanted.channelId !== undefined) {
       // One query for all four conditions: the channel exists, it is not deleted, the owner is a
       // member, and this agent is in it. Any miss is the same refusal, because telling them apart
       // would tell a caller which channel ids exist.
@@ -385,17 +529,112 @@ export function createRoutineStore(database: Database): RoutineStore {
             eq(channelAgents.agentId, agentId),
           ),
         )
-        .where(and(eq(channels.id, channelId), isNull(channels.deletedAt)))
+        .where(
+          and(eq(channels.id, wanted.channelId), isNull(channels.deletedAt)),
+        )
         .limit(1);
       const found = rows[0];
-      if (!found) throw new RoutineRefusedError(NO_SHARED_CHANNEL);
-      return found.id;
+      if (found) return found.id;
+      /*
+       * The ones they do share, by the titles the person reads, so a model that guessed an id has
+       * something true to ask with. Only the owner's own conversations with this Bot, which is
+       * nothing a caller could not already list, so the miss still says nothing about other ids.
+       */
+      const shared = await conversationsWith(ownerUserId, agentId, handle);
+      if (shared.length === 0) throw new RoutineRefusedError(NO_SHARED_CHANNEL);
+      throw new RoutineRefusedError(
+        `${NO_SHARED_CHANNEL} These are the ones we share: ${listThem(
+          shared,
+          here,
+        )}. Pass one of these ids as channelId.`,
+      );
     }
 
-    // Six rows is enough to answer the question: one resolves, more than one refuses, and the
-    // sentence names at most five before it says "and others".
-    const candidates = await handle
-      .select({ id: channels.id, name: channels.name })
+    if (here) return here;
+
+    const candidates = await conversationsWith(ownerUserId, agentId, handle);
+    const only = candidates[0];
+    if (!only) throw new RoutineRefusedError(NO_CHANNEL_AT_ALL);
+    if (candidates.length > 1) {
+      // Listed, because this refusal goes back to the model: a list of titles is a question it can
+      // put to the person, and "be more specific" is not.
+      throw new RoutineRefusedError(
+        `You have more than one conversation with me: ${listThem(
+          candidates,
+          here,
+        )}. Ask which one it should post in, offering each by its title, and pass the id of the one they choose as channelId.`,
+      );
+    }
+    return only.id;
+  }
+
+  /**
+   * The conversation a run's thread belongs to, when it is one this routine may post into.
+   *
+   * The owner's own thread of a live channel they are in, with this agent in it: the same join the
+   * routine runner needs at firing time, since it posts through the owner's thread of the channel.
+   * The thread came from the run, and a run's thread reaches the server from the browser, so it is
+   * a hint and never an authority: a thread that is somebody else's, or a channel the owner has left,
+   * finds nothing and the store falls back to asking. A scratch thread (a Bot answering another Bot,
+   * the direct chat) maps to no channel at all and finds nothing either.
+   */
+  async function conversationOf(
+    ownerUserId: string,
+    agentId: string,
+    threadId: string,
+    handle: Database | Transaction,
+  ): Promise<string | null> {
+    const [row] = await handle
+      .select({ id: channels.id })
+      .from(intelligenceChannelMappings)
+      .innerJoin(
+        channels,
+        and(
+          eq(channels.id, intelligenceChannelMappings.channelId),
+          isNull(channels.deletedAt),
+        ),
+      )
+      .innerJoin(
+        channelMemberships,
+        and(
+          eq(channelMemberships.channelId, channels.id),
+          eq(channelMemberships.userId, ownerUserId),
+        ),
+      )
+      .innerJoin(
+        channelAgents,
+        and(
+          eq(channelAgents.channelId, channels.id),
+          eq(channelAgents.agentId, agentId),
+        ),
+      )
+      .where(
+        and(
+          eq(intelligenceChannelMappings.threadId, threadId),
+          eq(intelligenceChannelMappings.userId, ownerUserId),
+        ),
+      )
+      .limit(1);
+    return row?.id ?? null;
+  }
+
+  /**
+   * The conversations this owner and this agent share, in the order the sidebar draws them.
+   *
+   * One more row than a refusal names, so "and others" is said only when there are others.
+   */
+  async function conversationsWith(
+    ownerUserId: string,
+    agentId: string,
+    handle: Database | Transaction,
+  ): Promise<Conversation[]> {
+    return await handle
+      .select({
+        id: channels.id,
+        summary: conversationCalled,
+        opening: channels.opening,
+        lastMessage: channels.lastMessage,
+      })
       .from(channels)
       .innerJoin(
         channelMemberships,
@@ -412,21 +651,8 @@ export function createRoutineStore(database: Database): RoutineStore {
         ),
       )
       .where(isNull(channels.deletedAt))
-      .orderBy(desc(channels.createdAt), desc(channels.id))
+      .orderBy(...ROSTER_ORDER)
       .limit(MAX_NAMED_CHANNELS + 1);
-
-    const only = candidates[0];
-    if (!only) throw new RoutineRefusedError(NO_CHANNEL_AT_ALL);
-    if (candidates.length > 1) {
-      // Named, because this refusal goes back to the model: a sentence listing the channels is a
-      // question it can put to the person, and "be more specific" is not.
-      throw new RoutineRefusedError(
-        `You are in more than one channel with me — ${nameThem(
-          candidates,
-        )}. Say which one.`,
-      );
-    }
-    return only.id;
   }
 
   /**
@@ -447,6 +673,99 @@ export function createRoutineStore(database: Database): RoutineStore {
         and(eq(routines.ownerUserId, ownerUserId), eq(routines.enabled, true)),
       );
     return row?.total ?? 0;
+  }
+
+  /**
+   * The goal a routine runs: the one named by `goalId`, else the one whose id its instruction names,
+   * among this Bot's goals for this owner. Null when it runs none. A goal named by id that is not
+   * theirs, or is complete, is refused in a sentence the model can act on.
+   *
+   * NEVER BY TITLE. FOUND BEFORE 0.3.3: a routine was taken to run any goal whose title its
+   * instruction contained, so a goal titled "Email" was run by every routine that mentioned email.
+   * A routine made for a goal records the goal's id, and that link is what everything reads.
+   */
+  async function goalItRuns(
+    ownerUserId: string,
+    agentId: string,
+    instruction: string,
+    goalId: string | undefined,
+    connection: Database | Transaction = database,
+  ): Promise<{ id: string; title: string } | null> {
+    const goals = await connection
+      .select({
+        id: responsibilities.id,
+        title: responsibilities.title,
+        status: responsibilities.status,
+      })
+      .from(responsibilities)
+      .where(
+        and(
+          eq(responsibilities.ownerUserId, ownerUserId),
+          eq(responsibilities.agentId, agentId),
+        ),
+      );
+    if (goalId !== undefined) {
+      const goal = goals.find((candidate) => candidate.id === goalId);
+      if (!goal)
+        throw new RoutineRefusedError(
+          "There is no goal of yours with that id for me. Take its id from list_goals.",
+          "goal_not_found",
+        );
+      if (goal.status === "completed")
+        throw new RoutineRefusedError(
+          `"${goal.title}" is complete, so a routine can't run it. Ask the person whether to set it up again as a new goal.`,
+          "goal_complete",
+        );
+      return goal;
+    }
+    return (
+      goals.find(
+        (goal) => goal.status !== "completed" && instruction.includes(goal.id),
+      ) ?? null
+    );
+  }
+
+  /**
+   * Refuses when the goal a routine records is complete, read under a share lock on the goal's
+   * row inside the routine's own transaction. Completing a goal locks that row for update and
+   * then switches off the routines that run it (`switchOffRoutinesOf` in the goal store), so the
+   * two can't interleave: this either waits for a completion and reads it, or commits first and
+   * is switched off by the completion that was waiting.
+   */
+  async function refuseCompletedGoal(
+    transaction: Transaction,
+    ownerUserId: string,
+    goalId: string,
+  ): Promise<void> {
+    const [goal] = await transaction
+      .select({
+        title: responsibilities.title,
+        status: responsibilities.status,
+      })
+      .from(responsibilities)
+      .where(
+        and(
+          eq(responsibilities.id, goalId),
+          eq(responsibilities.ownerUserId, ownerUserId),
+        ),
+      )
+      .for("share");
+    if (goal?.status === "completed")
+      throw new RoutineRefusedError(
+        `"${goal.title}" is complete, so a routine can't run it. Ask the person whether to set it up again as a new goal.`,
+        "goal_complete",
+      );
+  }
+
+  /** A goal's title as a routine's, which is capped shorter, or null when it cannot be one. */
+  function titleFromGoal(title: string): string | null {
+    // A goal's title may run to 160 characters and a routine's to 100, so a longer one is cut. Cut on
+    // graphemes, which can hold more code points than the cap counts: such a title leaves it untitled.
+    try {
+      return validTitle(oneLine(title, MAX_TITLE_CODE_POINTS));
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -500,17 +819,73 @@ export function createRoutineStore(database: Database): RoutineStore {
       if (patch.instruction !== undefined) {
         values.instruction = validInstruction(patch.instruction);
       }
+      if (patch.title !== undefined) values.title = validTitle(patch.title);
+      if (patch.goalId !== undefined) {
+        values.goalId =
+          (
+            await goalItRuns(
+              ownerUserId,
+              existing.agentId,
+              existing.instruction,
+              patch.goalId,
+              transaction,
+            )
+          )?.id ?? null;
+        // Given its goal, it is that goal's routine now, however it was linked before.
+        values.goalLinkedByRun = false;
+      }
       if (patch.channelId !== undefined) {
         values.channelId = await resolveChannel(
           ownerUserId,
           existing.agentId,
-          patch.channelId,
+          { channelId: patch.channelId },
           transaction,
         );
       }
       if (patch.enabled !== undefined) values.enabled = patch.enabled;
 
       const enabling = patch.enabled === true && !existing.enabled;
+      // The goal it will record after this write: the patch's, or the one it already has.
+      const recordedGoalId =
+        values.goalId !== undefined ? values.goalId : existing.goalId;
+      if (enabling && recordedGoalId)
+        await refuseCompletedGoal(transaction, ownerUserId, recordedGoalId);
+      if (enabling && !recordedGoalId && existing.goalByTitle) {
+        // Older schedules record no goal id. Match their instruction by the same rule that
+        // completion uses, and allow one to run while any named goal is still open.
+        // Share locks keep a concurrent completion from finishing before this enable commits.
+        const goals = await transaction
+          .select({
+            id: responsibilities.id,
+            title: responsibilities.title,
+            status: responsibilities.status,
+          })
+          .from(responsibilities)
+          .where(
+            and(
+              eq(responsibilities.ownerUserId, ownerUserId),
+              eq(responsibilities.agentId, existing.agentId),
+            ),
+          )
+          .for("share");
+        const named = goals.filter((goal) =>
+          routineRunsGoal(
+            {
+              ...existing,
+              instruction: values.instruction ?? existing.instruction,
+            },
+            goal,
+          ),
+        );
+        if (
+          named.length > 0 &&
+          named.every((goal) => goal.status === "completed")
+        )
+          throw new RoutineRefusedError(
+            "The goals this routine runs are complete, so it can't run them again. Ask the person whether to set it up again as a new goal.",
+            "goal_complete",
+          );
+      }
 
       const cron = patch.cron ?? existing.cron;
       const timezone = patch.timezone ?? existing.timezone;
@@ -553,14 +928,113 @@ export function createRoutineStore(database: Database): RoutineStore {
   return {
     update,
 
+    conversationFor: (ownerUserId, agentId, wanted) =>
+      resolveChannel(ownerUserId, agentId, wanted),
+
+    /*
+     * FOUND IN REVIEW: an older routine (`goalByTitle`) whose instruction names two goals of its Bot
+     * was linked to whichever one its firing ran first. A routine that records a goal runs that goal
+     * alone (`routineRunsGoal`), so the other stopped repeating and a run could then complete it, and
+     * completing the first switched the routine off while the other was still open
+     * (`switchOffRoutinesOf`). Such a routine is left unlinked, read from its instruction as before.
+     * So is one that names one goal and whose firing ran another: linked, it would stop running the
+     * goal it names.
+     *
+     * Counted among the goals that are not completed, as `switchOffRoutinesOf` counts them: a
+     * completed goal can't be resumed and its `run_goal` is refused, so linking a routine that also
+     * names one changes nothing it runs.
+     *
+     * FOUND IN REVIEW: the person could complete the goal while a firing's `run_goal` was still in
+     * flight. This read the routine, then wrote the link, with nothing holding the goal, so a routine
+     * could be linked to a goal already complete, and could never be switched back on (`goal_complete`).
+     * The goal's row is now held (`for share`) before the per-Bot lock and the routine's row, the
+     * order completing and deleting a goal take them in (`goalRoutinesLockKey`), and only an active
+     * goal is linked.
+     *
+     * How it was linked is recorded (`goalLinkedByRun`): by a run, unless its instruction clearly runs
+     * this goal (`instructionRunsGoal`), when it was made for the goal and only never recorded it.
+     */
+    async linkGoal(ownerUserId, agentId, routineId, goalId) {
+      return database.transaction(async (transaction) => {
+        const [goal] = await transaction
+          .select({
+            id: responsibilities.id,
+            title: responsibilities.title,
+            status: responsibilities.status,
+          })
+          .from(responsibilities)
+          .where(
+            and(
+              eq(responsibilities.id, goalId),
+              eq(responsibilities.ownerUserId, ownerUserId),
+              eq(responsibilities.agentId, agentId),
+            ),
+          )
+          .for("share");
+        if (goal?.status !== "active") return false;
+        await transaction.execute(
+          sql`select pg_advisory_xact_lock(hashtext(${goalRoutinesLockKey(ownerUserId, agentId)}))`,
+        );
+        const [routine] = await transaction
+          .select({
+            goalId: routines.goalId,
+            goalByTitle: routines.goalByTitle,
+            instruction: routines.instruction,
+          })
+          .from(routines)
+          .where(
+            and(
+              eq(routines.id, routineId),
+              eq(routines.ownerUserId, ownerUserId),
+              eq(routines.agentId, agentId),
+              isNull(routines.goalId),
+            ),
+          )
+          .for("update");
+        if (!routine) return false;
+        if (routine.goalByTitle) {
+          const open = await transaction
+            .select({ id: responsibilities.id, title: responsibilities.title })
+            .from(responsibilities)
+            .where(
+              and(
+                eq(responsibilities.ownerUserId, ownerUserId),
+                eq(responsibilities.agentId, agentId),
+                ne(responsibilities.status, "completed"),
+              ),
+            );
+          // Linked only when the goal it ran is the one open goal it names, or it names none.
+          const runs = open.filter((goal) => routineRunsGoal(routine, goal));
+          if (runs.some((goal) => goal.id !== goalId)) return false;
+        }
+        await transaction
+          .update(routines)
+          .set({
+            goalId,
+            goalLinkedByRun: !instructionRunsGoal(routine.instruction, goal),
+          })
+          .where(eq(routines.id, routineId));
+        return true;
+      });
+    },
+
     async create(input) {
       const instruction = validInstruction(input.instruction);
-      const timezone = input.timezone ?? "UTC";
-      const channelId = await resolveChannel(
+      const goal = await goalItRuns(
         input.ownerUserId,
         input.agentId,
-        input.channelId,
+        instruction,
+        input.goalId,
       );
+      // A routine that runs a goal is the person's goal on a schedule, so untitled it carries the
+      // goal's title rather than the instruction the Bot wrote for its next turn.
+      const title =
+        validTitle(input.title) ?? (goal ? titleFromGoal(goal.title) : null);
+      const timezone = input.timezone ?? "UTC";
+      const channelId = await resolveChannel(input.ownerUserId, input.agentId, {
+        channelId: input.channelId,
+        threadId: input.threadId,
+      });
       const nextRunAt = nextRunFor(input.cron, timezone, new Date());
 
       // Counted and inserted under the owner's cap lock, so two creates racing at 19 cannot both
@@ -568,6 +1042,9 @@ export function createRoutineStore(database: Database): RoutineStore {
       const [row] = await withEnabledCapLock(
         input.ownerUserId,
         async (transaction) => {
+          // Read again under the lock: the goal may have completed since `goalItRuns` read it.
+          if (goal)
+            await refuseCompletedGoal(transaction, input.ownerUserId, goal.id);
           if (
             (await countEnabled(transaction, input.ownerUserId)) >=
             MAX_ENABLED_ROUTINES
@@ -582,6 +1059,8 @@ export function createRoutineStore(database: Database): RoutineStore {
               agentId: input.agentId,
               channelId,
               instruction,
+              title,
+              goalId: goal?.id ?? null,
               cron: input.cron,
               timezone,
               nextRunAt,
@@ -607,7 +1086,10 @@ export function createRoutineStore(database: Database): RoutineStore {
       const rows = await database
         .select({
           routine: routines,
-          channelName: channels.name,
+          channelName: conversationName,
+          channelSummary: conversationCalled,
+          channelOpening: channels.opening,
+          channelLastMessage: channels.lastMessage,
           channelDeletedAt: channels.deletedAt,
           // A left join, and the id is selected to tell "no channel row at all" (a hard delete
           // somewhere else) from "soft-deleted": both mean the target is unusable, and neither is
@@ -649,20 +1131,93 @@ export function createRoutineStore(database: Database): RoutineStore {
           });
         }
       }
+      // The goals a routine can run, to say which one each does (`goalShownFor`): the goal a routine
+      // records, and every goal of a Bot with an older routine, which names its goals in its
+      // instruction (`goalByTitle`). Completed ones too: a routine that runs no open goal is still
+      // drawn under the completed one.
+      //
+      // FOUND IN REVIEW: this read every goal the owner had ever made, on every list, and matched
+      // each routine against all of them. A person who kept goals for years paid for that on every
+      // load of Routines. Now it reads only what a routine can point at, grouped by Bot, since a
+      // routine runs only its own Bot's goals.
+      const recorded = [
+        ...new Set(
+          rows.flatMap(({ routine }) =>
+            routine.goalId ? [routine.goalId] : [],
+          ),
+        ),
+      ];
+      const byTitle = [
+        ...new Set(
+          rows.flatMap(({ routine }) =>
+            !routine.goalId && routine.goalByTitle ? [routine.agentId] : [],
+          ),
+        ),
+      ];
+      const goals =
+        recorded.length > 0 || byTitle.length > 0
+          ? await database
+              .select({
+                id: responsibilities.id,
+                title: responsibilities.title,
+                agentId: responsibilities.agentId,
+                status: responsibilities.status,
+              })
+              .from(responsibilities)
+              .where(
+                and(
+                  eq(responsibilities.ownerUserId, ownerUserId),
+                  or(
+                    recorded.length > 0
+                      ? inArray(responsibilities.id, recorded)
+                      : undefined,
+                    byTitle.length > 0
+                      ? inArray(responsibilities.agentId, byTitle)
+                      : undefined,
+                  ),
+                ),
+              )
+          : [];
+      const goalsOfBot = new Map<string, (typeof goals)[number][]>();
+      for (const goal of goals)
+        goalsOfBot.set(goal.agentId, [
+          ...(goalsOfBot.get(goal.agentId) ?? []),
+          goal,
+        ]);
 
       return rows.map(
-        ({ routine, channelName, channelDeletedAt, channelExists }) => ({
+        ({
+          routine,
+          channelName,
+          channelSummary,
+          channelOpening,
+          channelLastMessage,
+          channelDeletedAt,
+          channelExists,
+        }) => ({
           id: routine.id,
           agentId: routine.agentId,
           instruction: routine.instruction,
+          title: routine.title,
           schedule: describeCron(routine.cron),
           timezone: routine.timezone,
           enabled: routine.enabled,
           nextRunAt: routine.nextRunAt,
           channelId: routine.channelId,
           channelName,
+          channelTitle:
+            channelExists === null
+              ? null
+              : conversationTitle({
+                  summary: channelSummary,
+                  opening: channelOpening,
+                  lastMessage: channelLastMessage,
+                }),
           channelDeleted: channelExists === null || channelDeletedAt !== null,
           lastRun: lastRuns.get(routine.id) ?? null,
+          goalId:
+            goalShownFor(routine, goalsOfBot.get(routine.agentId) ?? [])?.id ??
+            null,
         }),
       );
     },
@@ -838,6 +1393,7 @@ export function createRoutineStore(database: Database): RoutineStore {
       const [row] = await database
         .select({
           routineId: routines.id,
+          source: routineRuns.source,
           ownerUserId: routines.ownerUserId,
           agentId: routines.agentId,
           channelId: routines.channelId,

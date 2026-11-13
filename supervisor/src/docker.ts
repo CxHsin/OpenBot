@@ -294,6 +294,8 @@ async function inspectOwned(names: ComputerNames): Promise<{
   token?: string;
   shortId?: string;
   packageCapabilities: boolean;
+  /** The id of each network it is attached to, by name. See `onLiveNetwork`. */
+  networks: Record<string, string>;
 } | null> {
   try {
     const info = await docker.getContainer(names.container).inspect();
@@ -311,6 +313,11 @@ async function inspectOwned(names: ComputerNames): Promise<{
       // for the rest of its life. See `holdsCurrentToken`.
       token: tokenIn(info.Config?.Env),
       packageCapabilities: hasPackageCapabilities(info.HostConfig),
+      networks: Object.fromEntries(
+        Object.entries(info.NetworkSettings?.Networks ?? {}).map(
+          ([name, endpoint]) => [name, endpoint?.NetworkID ?? ""],
+        ),
+      ),
       // A second name for it on a shared network, for when its own is too long. See `networkHostFor`.
       ...(info.Id ? { shortId: info.Id.slice(0, 12) } : {}),
       /*
@@ -364,6 +371,32 @@ async function runsCurrentImage(
   }
 }
 
+/**
+ * Whether a computer is attached to the network of that name as it exists now.
+ *
+ * Compose removes its network when the stack stops and makes a new one, with a new id, when it
+ * starts. The computers are the supervisor's, not compose's, so a stopped one keeps the old id and
+ * Docker refuses to start it: "network ... not found". Every Bot's computer was dead after OpenBot
+ * was quit and opened again, or updated, and the Bot told the person Docker was unreachable.
+ *
+ * Unknown is answered as live, like `runsCurrentImage`: a failed inspect is no reason to replace a
+ * Bot's computer.
+ */
+async function onLiveNetwork(
+  networks: Record<string, string>,
+  network: string | undefined,
+): Promise<boolean> {
+  if (!network) return true;
+  try {
+    const live = await docker.getNetwork(network).inspect();
+    return typeof live?.Id === "string" && live.Id
+      ? networks[network] === live.Id
+      : true;
+  } catch {
+    return true;
+  }
+}
+
 /** `COMPUTER_TOKEN=...` out of a list of `KEY=value`, which is how both sides carry an environment. */
 function tokenIn(environment: string[] | undefined): string | undefined {
   const entry = environment?.find((line) => line.startsWith(`${TOKEN_NAME}=`));
@@ -394,6 +427,12 @@ const TOKEN_NAME = "COMPUTER_TOKEN";
  * A deployment that sets no token is not a mismatch. That is a computer with no door on it, which is
  * a choice the environment makes, and replacing a working browser over it would be this function
  * inventing a policy of its own.
+ *
+ * It is also how every computer moved off the deployment's token. Each computer is now given a token
+ * of its own (environment.ts), so one created before that, holding the deployment's token, holds a
+ * token this supervisor no longer hands out and is replaced here like any other, keeping its profile
+ * and workspace volumes. Left running, it would refuse the server's every call and go on carrying the
+ * one secret that opens every other person's computer.
  */
 function holdsCurrentToken(
   existingToken: string | undefined,
@@ -561,6 +600,9 @@ export async function ensure(
      * Bot keeps its logins and its files and comes back on the new image. That is the difference
      * between this and `reset`, which is asked for deliberately and does take the profile.
      *
+     * A stopped computer whose network was made again (see `onLiveNetwork`) is replaced the same
+     * way, onto the network as it is now.
+     *
      * What is lost is whatever the old computer held in memory: an open page and an outstanding
      * request for a person to take the wheel. Both belong to a run that the upgrade has already
      * ended, and a Bot carrying an hour-old handover prompt into a new conversation is the symptom
@@ -570,7 +612,9 @@ export async function ensure(
       existing &&
       (!(await runsCurrentImage(existing.image, options.image)) ||
         !holdsCurrentToken(existing.token, options.environment) ||
-        !existing.packageCapabilities)
+        !existing.packageCapabilities ||
+        (existing.status !== "running" &&
+          !(await onLiveNetwork(existing.networks, options.network))))
     ) {
       try {
         await docker

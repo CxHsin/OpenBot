@@ -10,7 +10,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { cleanup, render, within } from "@testing-library/react";
-import { AccessSections } from "@/components/bot-profile/access";
+import { AppsSections, SkillsSections } from "@/components/bot-profile/access";
 import type { AgentProfile } from "@/lib/agents/queries";
 import type { AppAccess } from "@/lib/app-access/queries";
 import { appAccess } from "./app-access-fixture";
@@ -38,6 +38,9 @@ afterEach(() => {
 });
 
 const BOT: AgentProfile = {
+  assignedToMe: false,
+  runsOnOpenBotModel: false,
+  keyFromOpenBot: false,
   id: "expenses",
   name: "Expenses",
   title: "Finance",
@@ -103,7 +106,12 @@ function draw() {
   const page = createRoute({
     getParentRoute: () => root,
     path: "/",
-    component: () => <AccessSections agent={BOT} />,
+    component: () => (
+      <>
+        <AppsSections agent={BOT} />
+        <SkillsSections agent={BOT} />
+      </>
+    ),
   });
   const grants = createRoute({
     getParentRoute: () => root,
@@ -127,7 +135,7 @@ function draw() {
 }
 
 const row = async (view: ReturnType<typeof draw>, key: string) => {
-  await view.findByText("What it can use");
+  await view.findByText("Apps it can use");
   const found = await view.findByText((_, element) =>
     Boolean(element?.getAttribute("data-app") === key),
   );
@@ -291,4 +299,22 @@ test("when the states cannot be read, the apps are still listed and the failure 
     "Couldn't check whether each app is ready for you. Reload the page.",
   );
   expect(await view.findByText("Google Drive")).toBeTruthy();
+});
+
+test("Routines' tools are listed as commands, like every other app's, not as what was done", async () => {
+  serving({
+    tools: [
+      "complete_goal",
+      "create_goal",
+      "create_routine",
+      "create_trigger",
+    ].map((name) => tool(`routines/${name}`, `mcp__routines__${name}`)),
+  });
+  const view = draw();
+  expect(
+    await view.findByText(
+      "Complete goal, Create goal, Create routine, Create trigger",
+    ),
+  ).toBeTruthy();
+  expect(view.queryByText(/Created a goal|Marked a goal complete/)).toBeNull();
 });

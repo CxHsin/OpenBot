@@ -35,6 +35,7 @@ import {
   setPolicyOverlay,
 } from "../computer/policy";
 import {
+  deliverEgressPolicies,
   type EgressPolicy,
   effectiveNetworkPolicy,
   egressDecision,
@@ -43,6 +44,7 @@ import {
 import type { ComputerProvider } from "../computer/provider";
 import type { Database } from "../db/client";
 import { agentProfiles, agents } from "../db/schema";
+import { isAlwaysOn } from "../plugins/personal-defaults";
 import type { ProactiveAdmin } from "../proactive/contracts";
 import { createOtelEventExporter, type EventExporter } from "../telemetry/otel";
 import { scrubCommand } from "../telemetry/scrub";
@@ -50,6 +52,7 @@ import type { WebBotAuth } from "../web-bot-auth";
 import { lastUsedByComputer, runningComputers } from "../work/culler";
 import {
   type Capability,
+  type CapabilityAnswer,
   type CapabilityRow,
   capabilityRefusal,
   DEFAULT_CAPABILITIES,
@@ -75,8 +78,84 @@ type Snapshot = {
   groupsByUser: Map<string, string[]>;
   settings: EnterpriseSettings;
   network: NetworkPolicyRow[];
+  /**
+   * The servers the MCP allowlist approves by their address rather than by their id: an admin can
+   * approve `https://mcp.example.com/mcp` before anybody has added it, and whichever server is then
+   * added at that address is approved. Absent reads as none.
+   */
+  addressApproved?: ReadonlySet<string>;
   loadedAt: Date;
 };
+
+/**
+ * A server address as the MCP allowlist compares it: scheme, host and path, without a trailing
+ * slash, a query or a fragment, the host in lower case. Null for anything that is not an http(s)
+ * address, which is how an entry that is a server id is told apart from one that is an address.
+ */
+export function normalizedServerAddress(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  const path = url.pathname.replace(/\/+$/, "");
+  return `${url.protocol}//${url.host.toLowerCase()}${path}`;
+}
+
+/** The ids of the servers standing at an address the allowlist names. */
+function addressApprovedServers(
+  servers: readonly string[],
+  rows: readonly { id: string; url: string }[],
+): Set<string> {
+  const addresses = new Set(
+    servers
+      .map(normalizedServerAddress)
+      .filter((value): value is string => value !== null),
+  );
+  if (addresses.size === 0) return new Set();
+  return new Set(
+    rows
+      .filter((row) => {
+        const address = normalizedServerAddress(row.url);
+        return address !== null && addresses.has(address);
+      })
+      .map((row) => row.id),
+  );
+}
+
+/**
+ * Whether the MCP allowlist lets somebody add a server at this address. Null when it does: the
+ * allowlist is off, or the address is on it. Otherwise the reason, in a sentence for the person.
+ *
+ * Only where enterprise controls are installed; the personal edition's settings fix the allowlist
+ * off, so it never refuses there. Controls that are installed and have not loaded yet refuse, as
+ * every other control does before its first read.
+ */
+export function mcpAddressRefusal(url: string): string | null {
+  const controls = installed;
+  if (!controls) return null;
+  const snapshot = controls.snapshot();
+  if (!snapshot) {
+    return "OpenBot's admin controls haven't loaded yet, so no server can be added. Try again in a moment.";
+  }
+  const allowlist = snapshot.settings.mcpAllowlist;
+  if (!allowlist.enabled) return null;
+  const address = normalizedServerAddress(url);
+  const approved = allowlist.servers.some(
+    (entry) => address !== null && normalizedServerAddress(entry) === address,
+  );
+  if (approved) return null;
+  const host = (() => {
+    try {
+      return new URL(url).host;
+    } catch {
+      return "that server";
+    }
+  })();
+  return `Your admin only allows approved MCP servers, and ${host} isn't one of them. Ask an admin to approve it.`;
+}
 
 export type EnterpriseDeps = {
   database: Database;
@@ -101,6 +180,15 @@ export type EnterpriseDeps = {
   webBotAuth?: WebBotAuth;
   /** `provider/model` the built-in Bot runs on, for the model allowlist and usage view. */
   builtInModel?: string;
+  /**
+   * The model a person picked for the conversation behind a thread, when there is one they may use
+   * (`channels/model-choice.ts`). A built-in run in that thread answers on it, so it is the model
+   * the allowlist judges and the usage row names.
+   */
+  pickedModel?: (
+    actorId: string,
+    threadId: string,
+  ) => Promise<string | undefined>;
   /** Offboarding: ends sessions and deny-lists, and retires what a person granted. */
   people?: {
     revoke: (userId: string, by: string) => Promise<void>;
@@ -138,6 +226,15 @@ export type EnterpriseControls = {
   terminateInactiveComputers: () => Promise<{ stopped: string[] } | null>;
   pushNetworkPolicies: () => Promise<void>;
   policyForBot: (botId: string) => Promise<EgressPolicy>;
+  /**
+   * Whose network policy a Bot's computer is under: its owner, as a member with their groups, and
+   * whether their "Cloud network access" capability is on. The lookup `policyForBot` makes, for a
+   * replay of a candidate policy (admin/network-replay.ts). Undefined until the controls have read
+   * their settings.
+   */
+  networkMemberFor: (
+    botId: string,
+  ) => Promise<{ member: Member; cloudNetwork: boolean } | undefined>;
   offboard: (userId: string, by: string) => Promise<void>;
   stop: () => Promise<void>;
 };
@@ -150,7 +247,7 @@ export function enterpriseControls(): EnterpriseControls | undefined {
 }
 
 /**
- * Skill sharing (Admin, Enterprise controls): whether people may open their Skills to every Bot. Off until the
+ * Skill sharing (Admin, Automatic learning): whether people may open their Skills to every Bot. Off until the
  * controls have read it, like every switch here. For a person's change, read fresh from the database.
  */
 export async function skillSharingAllowed(): Promise<boolean> {
@@ -198,23 +295,98 @@ export function decideFromSnapshot(
   snapshot: Snapshot | undefined,
   context: PolicyContext,
 ): PolicyDecision | null {
+  // The first refusal, and nothing past it is worked out: a generator stops where this stops.
+  for (const check of enterpriseChecks(snapshot, context))
+    if (check.refusal) return check.refusal;
+  return null;
+}
+
+/** The snapshot the computer boundary answers from, for a reader outside this module. */
+export type EnterpriseSnapshot = Snapshot;
+
+/** The snapshot as {@link installEnterpriseControls} reads it, for a reader that needs one now. */
+export const loadEnterpriseSnapshot = (store: EnterpriseStore) =>
+  loadSnapshot(store);
+
+/**
+ * One switch the overlay looked at, what it found, and the refusal it makes, if any. In the order the
+ * overlay looks at them, which is the order {@link decideFromSnapshot} refuses in.
+ */
+export type EnterpriseCheck =
+  | { control: "unavailable"; refusal: PolicyDecision }
+  | {
+      control: "app_allowlist";
+      server: string;
+      enabled: boolean;
+      /** Built in and always on (Routines), which the list never holds back. */
+      builtIn: boolean;
+      approved: boolean;
+      refusal: PolicyDecision | null;
+    }
+  | {
+      control: "capability";
+      capability: Capability;
+      answer: CapabilityAnswer;
+      refusal: PolicyDecision | null;
+    }
+  | {
+      control: "network";
+      host: string;
+      port: number;
+      policy: EgressPolicy & { from: string };
+      /** Null when only the computer can decide: an IP-range rule needs the resolved address. */
+      decision: { allowed: boolean; reason: string } | null;
+      refusal: PolicyDecision | null;
+    };
+
+/**
+ * Every switch the overlay asks about one action, each with what it found.
+ *
+ * The overlay itself ({@link decideFromSnapshot}) stops at the first refusal. "What would happen if…"
+ * (`what-if-check.ts`) reads all of them, so an admin sees every switch's answer and which one decides.
+ */
+export function* enterpriseChecks(
+  snapshot: Snapshot | undefined,
+  context: PolicyContext,
+): Generator<EnterpriseCheck> {
   if (!snapshot) {
-    return refusal(
-      "enterprise:unavailable",
-      "This deployment's enterprise controls have not loaded yet, so the action was refused.",
-    );
+    yield {
+      control: "unavailable",
+      refusal: refusal(
+        "enterprise:unavailable",
+        "This deployment's enterprise controls have not loaded yet, so the action was refused.",
+      ),
+    };
+    return;
   }
   const member = memberFrom(snapshot, context.actor.id);
   const needed: Capability[] = ["useBots"];
 
   if (context.mcp?.server) {
     const allowlist = snapshot.settings.mcpAllowlist;
-    if (allowlist.enabled && !allowlist.servers.includes(context.mcp.server)) {
-      return refusal(
-        "mcp_allowlist",
-        `The MCP server "${context.mcp.server}" is not on this deployment's approved list, so ${context.mcp.tool} was not called.`,
-      );
-    }
+    /*
+     * Routines is OpenBot's own, built in and always on for every Bot (plugins/personal-defaults.ts),
+     * not an outside server for the allowlist to approve. Holding it to the list would leave every
+     * Bot offered tools refused on every call, which nobody could remove.
+     */
+    const builtIn = isAlwaysOn(context.mcp.server);
+    const approved =
+      allowlist.servers.includes(context.mcp.server) ||
+      (snapshot.addressApproved?.has(context.mcp.server) ?? false);
+    yield {
+      control: "app_allowlist",
+      server: context.mcp.server,
+      enabled: allowlist.enabled,
+      builtIn,
+      approved,
+      refusal:
+        allowlist.enabled && !builtIn && !approved
+          ? refusal(
+              "mcp_allowlist",
+              `The MCP server "${context.mcp.server}" is not on this deployment's approved list, so ${context.mcp.tool} was not called.`,
+            )
+          : null,
+    };
   } else if (context.tool.name.startsWith("computer_")) {
     if (context.intent && COMPUTER_INTENTS.has(context.intent)) {
       needed.push("cloudComputer");
@@ -225,9 +397,15 @@ export function decideFromSnapshot(
   }
 
   for (const capability of needed) {
-    if (!resolveCapability(snapshot.rows, member, capability).allowed) {
-      return refusal(`capability:${capability}`, capabilityRefusal(capability));
-    }
+    const answer = resolveCapability(snapshot.rows, member, capability);
+    yield {
+      control: "capability",
+      capability,
+      answer,
+      refusal: answer.allowed
+        ? null
+        : refusal(`capability:${capability}`, capabilityRefusal(capability)),
+    };
   }
 
   /*
@@ -243,21 +421,25 @@ export function decideFromSnapshot(
   if (destination) {
     const policy = effectiveNetworkPolicy(snapshot.network, member, true);
     const hasRanges = policy.rules.some((rule) => rule.type === "cidr");
-    if (!hasRanges || /^[\d.:[\]]+$/.test(destination.host)) {
-      const decision = egressDecision(
-        policy,
-        destination.host,
-        destination.port,
-      );
-      if (!decision.allowed) {
-        return refusal(
-          `network:${policy.from}`,
-          `${decision.reason} An admin can add it.`,
-        );
-      }
-    }
+    const decision =
+      !hasRanges || /^[\d.:[\]]+$/.test(destination.host)
+        ? egressDecision(policy, destination.host, destination.port)
+        : null;
+    yield {
+      control: "network",
+      host: destination.host,
+      port: destination.port,
+      policy,
+      decision,
+      refusal:
+        decision && !decision.allowed
+          ? refusal(
+              `network:${policy.from}`,
+              `${decision.reason} An admin can add it.`,
+            )
+          : null,
+    };
   }
-  return null;
 }
 
 /**
@@ -269,7 +451,9 @@ export function decideFromSnapshot(
  * `erp.internal:8080` and matched none of them, so every allowed destination on a non-default port
  * was refused here, before the computer's filter, which reads the host and port apart, was asked.
  */
-function destinationOf(url: string): { host: string; port: number } | null {
+export function destinationOf(
+  url: string,
+): { host: string; port: number } | null {
   try {
     const parsed = new URL(url);
     if (!parsed.hostname) return null;
@@ -292,6 +476,14 @@ async function loadSnapshot(store: EnterpriseStore): Promise<Snapshot> {
   const admins = await store.adminIds();
   const settings = await store.settings();
   const network = await store.networkPolicies();
+  const addressApproved = addressApprovedServers(
+    settings.mcpAllowlist.servers,
+    settings.mcpAllowlist.servers.some(
+      (entry) => normalizedServerAddress(entry) !== null,
+    )
+      ? await store.serverAddresses()
+      : [],
+  );
   const groups = [
     ...new Set([
       ...rows
@@ -309,6 +501,7 @@ async function loadSnapshot(store: EnterpriseStore): Promise<Snapshot> {
     groupsByUser,
     settings,
     network,
+    addressApproved,
     loadedAt: new Date(),
   };
 }
@@ -330,6 +523,9 @@ export async function installEnterpriseControls(
   const refresh = async () => {
     try {
       snapshot = await loadSnapshot(store);
+      // Any Bot's network policy may have changed with what was just read, so the push on the way to
+      // each action sends it again rather than trusting that its computer already holds it.
+      deps.provider?.forgetPushedPolicies?.();
     } catch (error) {
       console.error(
         JSON.stringify({
@@ -355,8 +551,10 @@ export async function installEnterpriseControls(
 
   /*
    * Action Recording: every shell command a Bot ran (or was refused), scrubbed, into its own table.
-   * Read from the audit rows the computer gateway and the host broker already write, so the recorded
-   * outcome is the one the trail holds.
+   * Read from the audit rows the computer gateway writes, so the recorded outcome is the one the
+   * trail holds. A command on the person's own computer (`host/run_command`) is on the trail too,
+   * and is recorded by `guardHostAccess` below with the outcome the desktop gave, so it is skipped
+   * here and recorded once.
    */
   removeTaps.push(
     addAuditTap((event) => {
@@ -364,11 +562,12 @@ export async function installEnterpriseControls(
       if (!event.eventType.startsWith("computer.action_")) return;
       const command = commandOf(event.payload);
       if (!command) return;
+      // The gateway names the tool `action`; `tool` is accepted for any other writer.
+      const named = event.payload.action ?? event.payload.tool;
+      if (typeof named === "string" && named.startsWith("host/")) return;
       const scrubbed = scrubCommand(command);
       const botId =
         typeof event.payload.bot === "string" ? event.payload.bot : null;
-      // The gateway names the tool `action`; `tool` is accepted for any other writer.
-      const named = event.payload.action ?? event.payload.tool;
       const toolName =
         typeof named === "string" ? named : "computer_run_command";
       const actor =
@@ -377,7 +576,7 @@ export async function installEnterpriseControls(
       const outcome = event.eventType.replace("computer.action_", "");
       void store
         .recordAction({
-          surface: toolName.startsWith("host/") ? "local" : "cloud",
+          surface: "cloud",
           botId,
           actorUserId: actor,
           toolName,
@@ -416,12 +615,11 @@ export async function installEnterpriseControls(
       ),
     );
 
-  const policyForBot = async (botId: string): Promise<EgressPolicy> => {
-    // A person's own browser has no Bot and no owner to read a policy for, and the organization's is for Bots.
-    if (isPersonBrowserId(botId))
-      return deps.personBrowserPolicy ?? { mode: "deny_all", rules: [] };
+  const networkMemberFor: EnterpriseControls["networkMemberFor"] = async (
+    botId,
+  ) => {
     const current = snapshot;
-    if (!current) return { mode: "deny_all", rules: [] };
+    if (!current) return undefined;
     const [profile] = await deps.database
       .select({ owner: agentProfiles.ownerUserId })
       .from(agentProfiles)
@@ -430,51 +628,41 @@ export async function installEnterpriseControls(
     const member: Member = profile?.owner
       ? await store.member(profile.owner)
       : { role: "user", groups: [] };
-    const cloudNetwork = resolveCapability(
-      current.rows,
+    return {
       member,
-      "cloudNetwork",
-    ).allowed;
+      cloudNetwork: resolveCapability(current.rows, member, "cloudNetwork")
+        .allowed,
+    };
+  };
+
+  const policyForBot = async (botId: string): Promise<EgressPolicy> => {
+    // A person's own browser has no Bot and no owner to read a policy for, and the organization's is for Bots.
+    if (isPersonBrowserId(botId))
+      return deps.personBrowserPolicy ?? { mode: "deny_all", rules: [] };
+    const current = snapshot;
+    const owner = await networkMemberFor(botId);
+    if (!current || !owner) return { mode: "deny_all", rules: [] };
     const { from: _from, ...policy } = effectiveNetworkPolicy(
       current.network,
-      member,
-      cloudNetwork,
+      owner.member,
+      owner.cloudNetwork,
     );
     return deps.duringRecording ? deps.duringRecording(botId, policy) : policy;
   };
 
-  let pushing: Promise<void> | undefined;
+  // Tried again within seconds until it lands, quietly while a computer is likely still starting.
+  const delivery = deliverEgressPolicies({
+    push: () =>
+      pushEgressPolicies({
+        provider: deps.provider as ComputerProvider,
+        token: deps.computerToken,
+        policyForBot,
+        ...(deps.webBotAuth ? { webBotAuth: deps.webBotAuth } : {}),
+      }),
+  });
   const pushNetworkPolicies = async () => {
     if (!deps.provider) return;
-    if (pushing) return pushing;
-    pushing = (async () => {
-      try {
-        const report = await pushEgressPolicies({
-          provider: deps.provider as ComputerProvider,
-          token: deps.computerToken,
-          policyForBot,
-          ...(deps.webBotAuth ? { webBotAuth: deps.webBotAuth } : {}),
-        });
-        if (report.failed.length > 0) {
-          console.warn(
-            JSON.stringify({
-              type: "egress-policy-push-incomplete",
-              ...report,
-            }),
-          );
-        }
-      } catch (error) {
-        console.error(
-          JSON.stringify({
-            type: "egress-policy-push-failed",
-            error: String(error),
-          }),
-        );
-      } finally {
-        pushing = undefined;
-      }
-    })();
-    return pushing;
+    return delivery.push();
   };
 
   const ownedBots = async (userId: string) =>
@@ -693,9 +881,11 @@ export async function installEnterpriseControls(
     terminateInactiveComputers,
     pushNetworkPolicies,
     policyForBot,
+    networkMemberFor,
     offboard,
     stop: async () => {
       for (const timer of timers) clearInterval(timer);
+      delivery.stop();
       for (const remove of removeTaps) remove();
       setPolicyOverlay(null);
       installed = undefined;
@@ -802,12 +992,15 @@ type HostAccessLike = {
     botName: string;
     writable?: boolean;
   }): Promise<unknown>;
-  callHost(input: {
-    actorId: string;
-    botId: string;
-    kind: string;
-    command?: string;
-  }): Promise<unknown>;
+  callHost(
+    input: {
+      actorId: string;
+      botId: string;
+      kind: string;
+      command?: string;
+    },
+    hooks?: { onDispatch?: () => Promise<void> },
+  ): Promise<unknown>;
 };
 
 /** Refuse the member's own machine to somebody without "Local computer access", and record commands. */
@@ -836,7 +1029,10 @@ export function guardHostAccess<T extends HostAccessLike>(
       throw refuse(capabilityRefusal("localComputer"));
     return requestFolderGrant(input);
   }) as T["requestFolderGrant"];
-  broker.callHost = (async (input: Parameters<T["callHost"]>[0]) => {
+  broker.callHost = (async (
+    input: Parameters<T["callHost"]>[0],
+    hooks?: Parameters<T["callHost"]>[1],
+  ) => {
     if (!(await allowed(input.actorId)))
       throw refuse(capabilityRefusal("localComputer"));
     const controls = enterpriseControls();
@@ -855,7 +1051,7 @@ export function guardHostAccess<T extends HostAccessLike>(
         .catch(() => undefined);
     };
     try {
-      const result = await callHost(input);
+      const result = await callHost(input, hooks);
       record("allowed");
       return result;
     } catch (error) {
@@ -959,6 +1155,21 @@ export function auditRoutineStore<T extends RoutineLike>(
 /* ------------------------------ headless turns ------------------------------ */
 
 /**
+ * `provider/model` a built-in run in this thread answers on: the person's pick for the
+ * conversation, or the deployment's own. Same spelling as `builtInModel`.
+ */
+export async function builtInModelFor(
+  deps: Pick<EnterpriseDeps, "builtInModel" | "pickedModel">,
+  actorId: string,
+  threadId: string | null,
+): Promise<string | undefined> {
+  const deployment = deps.builtInModel;
+  if (!deployment || !threadId) return deployment;
+  const picked = await deps.pickedModel?.(actorId, threadId);
+  return picked ? `${deployment.split("/")[0]}/${picked}` : deployment;
+}
+
+/**
  * One usage row for a headless turn that reached the model, as the gate writes one for each browser
  * run (`gate.ts`): the configured model for a built-in Bot, `unknown` for a remote one, which chooses
  * its own and was not watched here.
@@ -983,7 +1194,13 @@ export async function recordHeadlessUsage(input: {
       .where(eq(agents.id, input.agentId))
       .limit(1);
     const model =
-      row?.type === "built_in" ? controls.deps.builtInModel : undefined;
+      row?.type === "built_in"
+        ? await builtInModelFor(
+            controls.deps,
+            input.ownerUserId,
+            input.threadId,
+          )
+        : undefined;
     // A model nobody named is allowed only while there is no list, as the gate records it.
     const listed = controls.snapshot()?.settings.modelAllowlist?.enabled;
     await controls.store.recordModelUsage({
@@ -1012,12 +1229,13 @@ export async function recordHeadlessUsage(input: {
  * Run now, responsibilities, follow-ups, group turns, delivery conversations and Slack, Teams and
  * SMS messages never cross it: they run through the shared headless turn runner, which asks here.
  * The allowlist is decided the way the gate decides it before a run: a built-in Bot runs on the
- * deployment's configured model, so that model is known; a remote Bot chooses its own and is
+ * conversation's picked model or the deployment's default; a remote Bot chooses its own and is
  * checked only by what it streams. Fails closed when the controls cannot be read.
  */
 export async function headlessTurnRefusal(input: {
   ownerUserId: string;
   agentId: string;
+  threadId?: string;
 }): Promise<string | null> {
   const controls = installed;
   if (!controls) return null;
@@ -1032,13 +1250,19 @@ export async function headlessTurnRefusal(input: {
       .where(eq(agents.id, input.agentId))
       .limit(1);
     const model =
-      row?.type === "built_in" ? controls.deps.builtInModel : undefined;
+      row?.type === "built_in"
+        ? await builtInModelFor(
+            controls.deps,
+            input.ownerUserId,
+            input.threadId ?? null,
+          )
+        : undefined;
     if (!model || allowlist.models.includes(model)) return null;
     await controls.store
       .recordModelUsage({
         userId: input.ownerUserId,
         agentId: input.agentId,
-        threadId: null,
+        threadId: input.threadId ?? null,
         runId: null,
         model,
         source: "configured",

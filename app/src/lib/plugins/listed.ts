@@ -18,7 +18,7 @@ const isBrokered = (server: PluginServer): boolean =>
  *
  * Exported as a function rather than left inline in the render, for the reason `matchingApps` on the
  * Composio picker is: the rule is the thing worth pinning and pinning it needs no DOM, no router and
- * no query client. See its one clause below.
+ * no query client. See its clauses below.
  */
 export function brokeredAccountsListedOn(
   servers: PluginServer[],
@@ -27,7 +27,9 @@ export function brokeredAccountsListedOn(
     (server) =>
       isBrokered(server) &&
       server.authScheme !== "NO_AUTH" &&
-      server.accountMode !== "shared",
+      server.accountMode !== "shared" &&
+      /* One that can only hold a shared account has nothing here for a person to connect. */
+      !server.sharedOnly,
   );
 }
 
@@ -55,4 +57,13 @@ export function sharedAccountsListedOn(
   return servers.filter(
     (server) => isBrokered(server) && server.accountMode === "shared",
   );
+}
+
+/**
+ * Servers somebody added by their address, from Connections or an admin's API call. Each is its own
+ * tile on Connections: one that signs each person in reads like any app you connect, and one that
+ * needs no account reads On.
+ */
+export function addedByUrlListedOn(servers: PluginServer[]): PluginServer[] {
+  return servers.filter((server) => server.provenance === "custom");
 }

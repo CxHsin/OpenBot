@@ -1,3 +1,4 @@
+import { appsPage } from "../edition";
 /**
  * The Arcade transport's vendor-free half. Imports no vendor package and nothing from
  * `arcade-adapter.ts`: the adapter imports this module, never the reverse (see `./broker`, which
@@ -7,6 +8,7 @@
 import { cutAtCodeUnits } from "../channels/text";
 import { flagOf } from "./broker";
 import { type ListedTool, MAX_RESULT_CHARS, type McpCallResult } from "./mcp";
+import { fitJsonResult } from "./result-fit";
 
 /**
  * Whether listing tools needs somebody's credential. It does not: the listing uses the deployment's
@@ -45,9 +47,12 @@ export function toolkitOf(url: string): string | null {
  * the one direction nothing downstream recovers from, since nothing ever asks again.
  *
  * ABSENT METADATA, OR A FLAG THAT `flagOf` ANSWERS NULL (a vendor publishing a string where it
- * documents a boolean), IS A DESTRUCTIVE WRITE, which is also what a listing that would not say
- * already records in `./mcp`. It fails safe by putting an approval in front of a read, which is
- * annoying and correct; the alternative lets a deletion through unannounced.
+ * documents a boolean), IS AN UNCLASSIFIED WRITE: `unclassified`, and never `destructive`. It is a
+ * write, so chat asks first wherever it asks before changes, and a check-in, a task's trusted read
+ * and a memory source all treat it as they treat a destructive action (see `mightDestroy` in
+ * `./catalogue`). It is not destructive, because Arcade never said so: that word is what makes a
+ * call always ask and what the Bot page draws in red, and it is kept for an action the vendor
+ * flagged. A Composio action with no label is recorded the same way (`effectOf` in `./composio`).
  *
  * AN EMPTY BEHAVIOUR OBJECT IS A VENDOR THAT SAID NOTHING, AND IS READ EXACTLY AS AN ABSENT ONE.
  * `{}` — or a block carrying only `idempotent` and the like — states NEITHER flag, so the two
@@ -69,8 +74,14 @@ export function toolkitOf(url: string): string | null {
 export function classify(metadata: unknown): {
   effect: "read" | "write";
   destructive: boolean;
+  /** Arcade said nothing this can read about what the action does. */
+  unclassified?: true;
 } {
-  const closed = { effect: "write", destructive: true } as const;
+  const closed = {
+    effect: "write",
+    destructive: false,
+    unclassified: true,
+  } as const;
   if (typeof metadata !== "object" || metadata === null) return closed;
   const behavior = (metadata as { behavior?: unknown }).behavior;
   if (typeof behavior !== "object" || behavior === null) return closed;
@@ -383,7 +394,7 @@ export async function listTools(connection: {
   const toolkit = toolkitOf(connection.url);
   if (!toolkit) {
     throw new Error(
-      `${connection.url} does not name an Arcade toolkit, so nothing was asked what it offers. The url has to be arcade:// followed by a toolkit name; correct it on the Plugins page.`,
+      `${connection.url} does not name an Arcade toolkit, so nothing was asked what it offers. The url has to be arcade:// followed by a toolkit name; correct it on the ${appsPage()} page.`,
     );
   }
   if (!installed) {
@@ -589,8 +600,8 @@ function arcadeFailure(thrown: unknown): ArcadeFailure | null {
 }
 
 /**
- * The cap every string this module puts in front of a model goes through, as `composio.ts`'s
- * `cap()` does, with the same limit and the same marker.
+ * The cap a failure's sentence goes through, as `composio.ts`'s `cap()` does, with the same limit
+ * and the same marker. A result goes through `fitJsonResult` in `./result-fit`, as Composio's does.
  *
  * A tool result is read by a model AND copied into the audit row, so an unbounded one is somebody
  * else's server deciding how much of our context window to spend and how large a durable record
@@ -700,7 +711,12 @@ export async function callTool(
         `${toolName} ran, but its answer has no JSON form, so there is nothing to show.`,
       );
     }
-    return { ...cap(value), isError: false };
+    // Fitted as `composio.ts` fits its results: a list is cut between its records, and the note
+    // says how to read the rest. See `./result-fit`.
+    return {
+      ...fitJsonResult(answer.output?.value ?? null, value, toolName),
+      isError: false,
+    };
   } catch (thrown) {
     const failure = arcadeFailure(thrown);
     if (failure && isAuthorizationRequired(failure)) {

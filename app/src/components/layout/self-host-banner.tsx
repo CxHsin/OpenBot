@@ -1,16 +1,12 @@
 import { IconX } from "@tabler/icons-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { openTeamFeatures } from "@/components/edition/team-features-dialog";
+import { Button } from "@/components/ui/button";
 import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
 import {
   dismissSelfHostBannerMutationOptions,
   useUserPreferences,
 } from "@/lib/settings/message-list";
-import { cn } from "@/lib/utils";
-
-/** `ref` tells CopilotKit the visit came from inside a running OpenBot, not from the README. */
-export const SELF_HOST_URL =
-  "https://copilotkit.ai/talk-to-an-engineer?ref=openbot_app";
 
 /**
  * A slim bar offering help self-hosting OpenBot, until this person closes it.
@@ -47,19 +43,16 @@ export function SelfHostBanner() {
         Self-host OpenBot for your organization.
       </p>
       <span className="flex items-center gap-2">
-        {/* An anchor, not Button: Base UI gives a rendered anchor role="button", and this is a link. */}
-        <a
+        {/* Opens the OpenBot for Business dialog, where the calendar is, in the app. */}
+        <Button
           // Foreground, not the link variant's primary, which is a mid grey on the dark bar.
-          className={cn(
-            buttonVariants({ size: "sm", variant: "link" }),
-            "px-0 text-foreground underline",
-          )}
-          href={SELF_HOST_URL}
-          rel="noopener noreferrer"
-          target="_blank"
+          className="px-0 text-foreground underline"
+          onClick={openTeamFeatures}
+          size="sm"
+          variant="link"
         >
-          Talk to an engineer
-        </a>
+          Book a call
+        </Button>
         <Button
           aria-label="Dismiss"
           onClick={() => dismiss.mutate()}

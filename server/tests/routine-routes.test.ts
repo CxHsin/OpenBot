@@ -21,17 +21,20 @@ function summary(overrides: Partial<RoutineSummary> = {}): RoutineSummary {
     id: "routine-1",
     agentId: "agent-1",
     instruction: "Post the weather every weekday morning.",
+    title: null,
     schedule: "Weekdays at 09:00",
     timezone: "UTC",
     enabled: true,
     nextRunAt: new Date("2026-08-27T09:00:00.000Z"),
     channelId: "channel-1",
     channelName: "Assistant channel",
+    channelTitle: "Standup notes",
     channelDeleted: false,
     lastRun: {
       status: "succeeded",
       finishedAt: new Date("2026-08-26T09:00:00.000Z"),
     },
+    goalId: null,
     ...overrides,
   };
 }
@@ -44,6 +47,24 @@ function fakeStore(
   const calls: StoreCall[] = [];
   const base: RoutineStore = {
     async create() {
+      throw new Error("not used by these tests");
+    },
+    async conversationFor() {
+      throw new Error("not used by these tests");
+    },
+    async linkGoal() {
+      throw new Error("not used by these tests");
+    },
+    async startManualRun() {
+      throw new Error("not used by these tests");
+    },
+    async listRuns() {
+      throw new Error("not used by these tests");
+    },
+    async reapAbandonedRuns() {
+      throw new Error("not used by these tests");
+    },
+    async markUnschedulable() {
       throw new Error("not used by these tests");
     },
     async listFor(ownerUserId) {
@@ -126,14 +147,30 @@ describe("GET /", () => {
           schedule: "Weekdays at 09:00",
           timezone: "UTC",
           instruction: "Post the weather every weekday morning.",
-          channel: { id: "channel-1", name: "Assistant channel", gone: false },
+          title: null,
+          channel: {
+            id: "channel-1",
+            name: "Assistant channel",
+            title: "Standup notes",
+            gone: false,
+          },
           enabled: true,
           nextRunAt: "2026-08-27T09:00:00.000Z",
           lastRun: { status: "succeeded", at: "2026-08-26T09:00:00.000Z" },
+          goalId: null,
         },
       ],
     });
     expect(store.calls).toEqual([["listFor", actor.id]]);
+  });
+
+  test("says which goal a routine runs, so the page draws it as that goal's start", async () => {
+    const store = fakeStore({
+      listFor: async () => [summary({ goalId: "goal-1" })],
+    });
+    const response = await appFor(store).request("http://openbot.test/");
+
+    expect((await json(response)).routines[0].goalId).toBe("goal-1");
   });
 
   test("carries no lastRun when the routine has never fired", async () => {
@@ -162,7 +199,11 @@ describe("GET /", () => {
   test("a channel with no name and gone reads as gone with a null name", async () => {
     const store = fakeStore({
       listFor: async () => [
-        summary({ channelName: null, channelDeleted: true }),
+        summary({
+          channelName: null,
+          channelTitle: null,
+          channelDeleted: true,
+        }),
       ],
     });
     const response = await appFor(store).request("http://openbot.test/");
@@ -170,6 +211,7 @@ describe("GET /", () => {
     expect((await json(response)).routines[0].channel).toEqual({
       id: "channel-1",
       name: null,
+      title: null,
       gone: true,
     });
   });
@@ -191,6 +233,29 @@ describe("GET /", () => {
 
     expect(response.status).toBe(401);
     expect(store.calls).toEqual([]);
+  });
+});
+
+describe("POST /", () => {
+  test("a saved routine answers 201 even when the list can't be read", async () => {
+    const store = fakeStore({
+      create: async () => ({ id: "routine-9" }) as never,
+      listFor: async () => {
+        throw new Error("down");
+      },
+    });
+    const response = await appFor(store).request("http://openbot.test/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agentId: "agent-1",
+        instruction: "Tidy the leads list",
+        cron: "0 9 * * 1-5",
+        channelId: "channel-1",
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(await json(response)).toEqual({ routine: { id: "routine-9" } });
   });
 });
 

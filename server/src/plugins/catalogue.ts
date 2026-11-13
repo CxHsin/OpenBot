@@ -33,6 +33,8 @@ import {
 // The one place browsing and this check agree on: the addresses that hold the deployment's own
 // cloud credentials. `target.ts` imports nothing itself, so asking it here adds no dependency.
 import { isNeverAllowedHostname } from "../computer/target";
+// `edition.ts` imports only types, so asking it which edition is running adds no cycle.
+import { currentEdition } from "../edition";
 // Type-only, so naming the transport here creates no import cycle with the registry that resolves it.
 import type { CuratedTransportKind } from "./transport";
 
@@ -93,6 +95,18 @@ export type CatalogueEntry = {
   title: string;
   vendor: string;
   summary: string;
+  /**
+   * The summary the personal edition shows, where the summary above is written for a team ("of
+   * whoever is asking", "this deployment's key"). The personal edition has one person, so it says
+   * "your". Absent where the summary already reads right for one person. See {@link summaryFor}.
+   */
+  personalSummary?: string;
+  /**
+   * Offered only in the team edition. The personal edition reaches these vendors through the
+   * broker's directory instead, so listing the built-in one too would put two of the same app side by
+   * side. One already added stays listed and keeps working: see {@link offeredHere}.
+   */
+  teamOnly?: true;
   /**
    * The one host this server lives on. Null for a vendor that gives every customer their own
    * hostname, where {@link CatalogueEntry.hostPattern} decides instead.
@@ -208,10 +222,9 @@ const FIRECRAWL_READ_TOOLS = Object.freeze([
  * branch it falls into.
  *
  * Routines is the first entry here that is not a remote vendor at all — no host to dial, nothing
- * outside this process to trust. It is in the catalogue anyway, on purpose rather than by oversight:
- * the catalogue is where a deployment decides which Bots may do what, and a Bot that can schedule its
- * own future runs is a capability worth that same deliberate grant, even though there is no vendor on
- * the other end of it.
+ * outside this process to trust. It is in the catalogue so its tools reach a Bot the same way every
+ * other app's do, as grants. Unlike every other entry it is always on: the server adds it at startup
+ * and gives every Bot all of its tools. See `personal-defaults.ts`.
  */
 export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
   {
@@ -232,6 +245,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     vendor: "Parallel",
     summary:
       "Public-web search and extraction using this deployment's Parallel API key.",
+    personalSummary:
+      "Public-web search and extraction using your Parallel API key.",
     host: "https://search.parallel.ai",
     path: "/mcp",
     auth: { kind: "deployment-bearer" },
@@ -257,6 +272,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     vendor: "Exa",
     summary:
       "Public-web search and page reading using this deployment's Exa API key.",
+    personalSummary:
+      "Public-web search and page reading using your Exa API key.",
     host: "https://mcp.exa.ai",
     path: "/mcp",
     // Exa reads its key from `x-api-key`, not from `Authorization`.
@@ -284,6 +301,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     vendor: "Firecrawl",
     summary:
       "Public-web search and page scraping using this deployment's Firecrawl API key.",
+    personalSummary:
+      "Public-web search and page scraping using your Firecrawl API key.",
     host: "https://mcp.firecrawl.dev",
     path: "/v2/mcp",
     auth: { kind: "deployment-bearer" },
@@ -297,6 +316,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     title: "Google Drive",
     vendor: "Google",
     summary: "Files in the Drive of whoever is asking.",
+    personalSummary: "Files in your Drive.",
+    teamOnly: true,
     /*
      * Google publishes one MCP server per Workspace product, each on its own host: Gmail, Docs,
      * Sheets, Slides, Calendar, Chat and People have their own. Drive is here because it is the one
@@ -370,6 +391,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     title: "Notion",
     vendor: "Notion",
     summary: "Pages and databases of whoever is asking.",
+    personalSummary: "Your pages and databases.",
+    teamOnly: true,
     /*
      * The hosted MCP server Notion runs, on the default MCP transport — the first entry to use
      * it. Drive's REST adapter is a workaround for a preview-gated vendor; Notion's server is
@@ -477,11 +500,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     vendor: "OpenBot",
     summary:
       "Standing instructions a Bot runs on a schedule, as whoever scheduled them.",
-    /*
-     * First-party and in-process: no host to dial, no credential to hold. In the catalogue anyway,
-     * because the catalogue is where a deployment decides WHICH Bots may do WHAT — and scheduling
-     * future work is a capability an administrator should grant as deliberately as a vendor.
-     */
+    personalSummary: "Standing instructions your Bots run on a schedule.",
+    // First-party and in-process: no host to dial, no credential to hold. Always on, for every Bot.
     host: "builtin://routines",
     path: "/",
     transport: "builtin-routines",
@@ -494,6 +514,12 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
       "pause_trigger",
       "resume_trigger",
       "delete_trigger",
+      "create_goal",
+      "update_goal",
+      "run_goal",
+      "pause_goal",
+      "resume_goal",
+      "complete_goal",
     ]),
     docsUrl: "https://github.com/CopilotKit/OpenBot/blob/main/docs/routines.md",
   },
@@ -533,8 +559,29 @@ export function tokenHeaderFor(
     : undefined;
 }
 
+/**
+ * Whether this edition offers the entry to somebody who hasn't added it: every entry in the team
+ * edition, and every one not marked `teamOnly` in the personal edition. Not a refusal: an entry
+ * already added is still served, listed and called, so a connection nobody can see never keeps
+ * working behind the screen.
+ */
+export function offeredHere(entry: CatalogueEntry): boolean {
+  return !entry.teamOnly || currentEdition() !== "personal";
+}
+
 export function catalogueEntry(key: string): CatalogueEntry | null {
   return BY_KEY.get(key) ?? null;
+}
+
+/**
+ * The summary a person reads in this edition: the personal one where the entry has one and the
+ * personal edition is running, the team one everywhere else. For the browser only; nothing a model
+ * reads goes through here.
+ */
+export function summaryFor(entry: CatalogueEntry): string {
+  return currentEdition() === "personal"
+    ? (entry.personalSummary ?? entry.summary)
+    : entry.summary;
 }
 
 /**
@@ -656,8 +703,9 @@ export function classifyTool(
  * while chat goes on answering exactly as it did.
  *
  * WHICH LABELS COUNT, in the order they are read:
- * - The server said it destroys something (`destructiveHint`, a broker's destructive flag): never.
- *   This wins over everything, including a read-only label beside it.
+ * - The server said it destroys something (`destructiveHint`, a broker's destructive flag), or a
+ *   broker said nothing about it at all (`unclassified`): never. This wins over everything,
+ *   including a read-only label beside it. See {@link mightDestroy}.
  * - A reviewed write list names it: never. A person read that list; a label is the vendor's.
  * - {@link classifyTool} calls it a read: a broker's own read label (Composio, Arcade), or a
  *   reviewed list that names it a read or declined to call it a write.
@@ -673,14 +721,28 @@ export function labelledRead(
     /** What the vendor recorded for it, as `classifyTool` reads it. */
     effect: string | null;
     destructive: boolean;
+    unclassified?: boolean;
     /** The server's own `readOnlyHint`, as the listing recorded it. */
     declaredRead: boolean;
   },
 ): boolean {
-  if (tool.destructive) return false;
+  if (mightDestroy(tool)) return false;
   if (entry?.writeTools.includes(toolName)) return false;
   if (classifyTool(entry, toolName, true, tool.effect) === "read") return true;
   return tool.declaredRead;
+}
+
+/**
+ * Whether a background read must keep away from this tool: its vendor said it destroys something,
+ * or a broker listed it and said nothing about what it does (`mcpTools.unclassified`). The second is
+ * not a claim that it destroys anything, so it doesn't make a call always ask; it is only not a
+ * claim that it doesn't.
+ */
+export function mightDestroy(tool: {
+  destructive: boolean;
+  unclassified?: boolean;
+}): boolean {
+  return tool.destructive || tool.unclassified === true;
 }
 
 /**
@@ -696,14 +758,14 @@ export function labelledRead(
  * a vendor adds later would pass. Each of those is still a read for a check-in, which only reads.
  * In a task they ask, like any change.
  *
- * A destructive label or a reviewed write still wins over the read list.
+ * A destructive label, a broker's silence or a reviewed write still wins over the read list.
  */
 export function reviewedRead(
   entry: CatalogueEntry | null,
   toolName: string,
-  tool: { destructive: boolean },
+  tool: { destructive: boolean; unclassified?: boolean },
 ): boolean {
-  if (tool.destructive || !entry?.readTools) return false;
+  if (mightDestroy(tool) || !entry?.readTools) return false;
   if (entry.writeTools.includes(toolName)) return false;
   return entry.readTools.includes(toolName);
 }
@@ -764,6 +826,22 @@ function readsAsCredential(name: string): boolean {
 }
 
 /**
+ * The one exception to the floor below, and only when an operator turns it on: an MCP server on this
+ * machine's own loopback address, `127.0.0.1` or `[::1]`, over http or https.
+ *
+ * For developing an MCP server against OpenBot and for the end-to-end tests that run one, never for
+ * a deployment people use: `OPENBOT_ALLOW_LOOPBACK_MCP=1` in the environment, and nothing a request
+ * carries, turns it on. Every other address keeps every rule, and a loopback address with userinfo
+ * in it is still refused.
+ */
+function loopbackServerAdmitted(url: URL): boolean {
+  if (process.env.OPENBOT_ALLOW_LOOPBACK_MCP !== "1") return false;
+  if (url.username || url.password) return false;
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  return url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+}
+
+/**
  * Is this a URL an administrator may point the deployment at?
  *
  * A curated entry is reviewed in code; this is the other path, and it needs its own floor because
@@ -785,6 +863,8 @@ export function customUrlRefusal(raw: string): string | null {
   } catch {
     return "That is not a URL.";
   }
+
+  if (loopbackServerAdmitted(url)) return null;
 
   if (url.protocol !== "https:") {
     return "An MCP server must be reached over https.";

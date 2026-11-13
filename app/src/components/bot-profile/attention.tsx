@@ -5,10 +5,15 @@ import {
   botAttentionQueryOptions,
   lastPingQueryOptions,
 } from "@/lib/bot-lifecycle/queries";
+// Whether this browser, or OpenBot Desktop, lets OpenBot interrupt: the same answer the offer to
+// turn notifications on reads, so the two cannot disagree.
+import { notificationsAllowed } from "@/lib/notifications/permission";
+import { conversationTag, inSight, showNotice } from "@/lib/notifications/show";
 import {
   type ProactiveSuggestion,
   proactiveSuggestionsQueryOptions,
 } from "@/lib/proactive";
+import { cn } from "@/lib/utils";
 
 /**
  * Questions, approvals and stalled hand-offs: the things only the person can move forward, answered
@@ -32,11 +37,13 @@ export function asksOf(bot: BotAttention): number {
 }
 
 /**
- * Everything from this Bot that waits on the person: what `asksOf` counts, the items its check-ins
- * found, and its tasks with a reply to read or a failure to try again.
+ * What this Bot is stopped on until the person acts: what `asksOf` counts, and its tasks with a
+ * reply to read or a failure to try again. Not what its check-ins found: that is something the
+ * person may act on or not, listed under From check-ins and shown as a dot, never counted, so the
+ * number means a Bot is blocked.
  */
 export function waitingOnYou(bot: BotAttention): number {
-  return asksOf(bot) + bot.items + bot.tasks.ready + bot.tasks.failed;
+  return asksOf(bot) + bot.tasks.ready + bot.tasks.failed;
 }
 
 const count = (total: number, one: string, many: string) =>
@@ -66,18 +73,6 @@ export function attentionSummary(bot: BotAttention): string {
     parts.push(count(bot.tasks.failed, "failed task", "failed tasks"));
   if (bot.unread) parts.push(`${bot.unread} unread`);
   return parts.join(", ");
-}
-
-/** Whether this browser lets OpenBot interrupt. Some browsers throw on the mere question. */
-function notificationsAllowed() {
-  try {
-    return (
-      typeof Notification !== "undefined" &&
-      Notification.permission === "granted"
-    );
-  } catch {
-    return false;
-  }
 }
 
 /** A push body is cut here too, so the browser says what the phone says. */
@@ -135,6 +130,17 @@ export function pingNotice(
 }
 
 /**
+ * Where a "needs you" notice opens: the conversation that is waiting, when there is one, so the
+ * person lands on the question or the card itself. Otherwise the Bot's page, which lists what it
+ * waits on.
+ */
+export function noticePath(bot: BotAttention): string {
+  return bot.waitingIn
+    ? `/channel/${encodeURIComponent(bot.waitingIn)}`
+    : `/bots/${encodeURIComponent(bot.agentId)}`;
+}
+
+/**
  * A browser notification when a Bot starts needing this person for a question, an approval, a
  * stalled hand-off or a task waiting on them, if they allowed notifications and did not mute this
  * Bot. Badges show either way; this is the interruption, and it is opt-in.
@@ -144,26 +150,36 @@ export function pingNotice(
  */
 function useAttentionNotifications(bots: BotAttention[] | undefined) {
   const seen = useRef<Map<string, number> | null>(null);
+  // Asks OpenBot Desktop now, while OpenBot is in front, so its answer is in before anything needs
+  // the person.
+  useEffect(() => {
+    void notificationsAllowed();
+  }, []);
   useEffect(() => {
     if (!bots) return;
     const previous = seen.current;
     seen.current = new Map(bots.map((bot) => [bot.agentId, asksOf(bot)]));
     // The first answer is the state on arrival, not news.
     if (!previous) return;
-    if (!notificationsAllowed()) return;
-    for (const bot of bots) {
-      const now = asksOf(bot);
-      if (bot.notify === "none" || now <= (previous.get(bot.agentId) ?? 0))
-        continue;
-      try {
-        new Notification(`${bot.name} needs you`, {
+    const rose = bots.filter(
+      (bot) =>
+        bot.notify !== "none" && asksOf(bot) > (previous.get(bot.agentId) ?? 0),
+    );
+    if (rose.length === 0) return;
+    void notificationsAllowed().then((allowed) => {
+      // Someone looking at OpenBot sees the badge and the conversation; a notice is for when they are not.
+      if (!allowed || inSight()) return;
+      for (const bot of rose)
+        showNotice({
+          title: `${bot.name} needs you`,
           body: attentionSummary(bot),
-          tag: `openbot-attention-${bot.agentId}`,
+          // The conversation's tag when it waits in one: its reply notice, if any, is replaced by this.
+          tag: bot.waitingIn
+            ? conversationTag(bot.waitingIn)
+            : `openbot-attention-${bot.agentId}`,
+          path: noticePath(bot),
         });
-      } catch {
-        // A browser that refuses the constructor still has the badge.
-      }
-    }
+    });
   }, [bots]);
 }
 
@@ -194,22 +210,23 @@ function usePingNotifications(
     const previous = seen.current;
     seen.current = lastPingId;
     if (previous === undefined || lastPingId === null) return;
-    if (lastPingId === previous || !notificationsAllowed()) return;
-    void refetch().then(({ data }) => {
+    if (lastPingId === previous) return;
+    void (async () => {
+      if (!(await notificationsAllowed())) return;
+      const { data } = await refetch();
       const notice = pingNotice(
         (data ?? []).filter((item) => item.pingId === lastPingId),
         (agentId) =>
           names.current?.find((bot) => bot.agentId === agentId)?.name,
       );
-      try {
-        new Notification(notice.title, {
-          body: notice.body,
-          tag: `openbot-ping-${lastPingId}`,
-        });
-      } catch {
-        // A browser that refuses the constructor still has the badge and the list.
-      }
-    });
+      // Bots lists what the ping carried first, under Needs you.
+      showNotice({
+        title: notice.title,
+        body: notice.body,
+        tag: `openbot-ping-${lastPingId}`,
+        path: "/bots",
+      });
+    })();
   }, [lastPingId, refetch]);
 }
 
@@ -222,8 +239,11 @@ function usePingNotifications(
  * screen and always reading this.
  *
  * Renders nothing when nothing is waiting, so a quiet day costs the sidebar nothing.
+ *
+ * `onIcon` draws it to sit on an icon's corner rather than at the end of a row: the count in a
+ * 16px circle that a second digit widens, small enough to leave an 18px icon readable under it.
  */
-export function BotsNavBadge() {
+export function BotsNavBadge({ onIcon = false }: { onIcon?: boolean } = {}) {
   const attention = useQuery(botAttentionQueryOptions());
   const lastPing = useQuery(lastPingQueryOptions());
   useAttentionNotifications(attention.data);
@@ -234,18 +254,27 @@ export function BotsNavBadge() {
     return (
       <span
         aria-label={`${waiting} ${waiting === 1 ? "thing needs" : "things need"} you`}
-        className="ml-auto rounded-full bg-primary px-1.5 text-[11px] font-medium text-primary-foreground tabular-nums"
+        className={cn(
+          "rounded-full bg-primary font-medium text-primary-foreground tabular-nums",
+          onIcon
+            ? "grid h-4 min-w-4 place-items-center px-1 text-[10px] leading-none"
+            : "ml-auto px-1.5 text-[11px]",
+        )}
         role="img"
       >
         {waiting}
       </span>
     );
   }
-  if (bots.some((bot) => bot.unread > 0)) {
+  if (bots.some((bot) => bot.unread > 0 || bot.items > 0)) {
     return (
       <span
-        aria-label="Unread messages"
-        className="ml-auto size-2 rounded-full bg-primary"
+        aria-label={
+          bots.some((bot) => bot.unread > 0)
+            ? "Unread messages"
+            : "Your check-ins found something"
+        }
+        className={cn("size-2 rounded-full bg-primary", !onIcon && "ml-auto")}
         role="img"
       />
     );

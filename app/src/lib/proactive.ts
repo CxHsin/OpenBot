@@ -26,6 +26,9 @@ export type ProactiveSetting = {
   agentId: string;
   channelId: string;
   focus: string;
+  /** What it watches, in the person's words. Empty on one that watches everything the Bot reads. */
+  subject?: string;
+  sourceLink?: string | null;
   enabled: boolean;
   intervalMinutes: number;
   nextRunAt: string;
@@ -65,6 +68,8 @@ type ProactiveSettingsBody = {
 export type ProactiveSuggestion = {
   id: string;
   agentId: string;
+  /** The check-in that found it. */
+  settingId?: string | null;
   title: string;
   detail: string;
   sourceApp: string | null;
@@ -132,17 +137,30 @@ export const proactiveSuggestionsQueryOptions = () =>
     refetchInterval: 30_000,
   });
 
-export const createProactiveSetting = (input: {
-  agentId: string;
-  channelId: string;
-  focus: string;
-  intervalMinutes: number;
-}) =>
-  client("/api/proactive/settings", {
-    method: "POST",
-    body: input,
-    fallback: "Couldn't turn on check-ins",
-  });
+/**
+ * A check-in for a Bot. One on a thing the Bot already watches (the same link, or the same subject)
+ * is turned back on with what was sent, which is what accepting an offer means. `refuseExisting` is
+ * for a screen that asked for a new one: the server refuses that with 409 and says why.
+ */
+export const createProactiveSetting = (
+  input: {
+    agentId: string;
+    channelId: string;
+    focus: string;
+    subject?: string;
+    sourceLink?: string;
+    intervalMinutes: number;
+  },
+  { refuseExisting = false }: { refuseExisting?: boolean } = {},
+) =>
+  client(
+    `/api/proactive/settings${refuseExisting ? "?refuseExisting=true" : ""}`,
+    {
+      method: "POST",
+      body: input,
+      fallback: "Couldn't turn on check-ins",
+    },
+  );
 export const updateProactiveSetting = (
   id: string,
   input: { enabled?: boolean; intervalMinutes?: number; focus?: string },
@@ -209,7 +227,8 @@ export const createProactiveSettingMutationOptions = (
   queryClient: QueryClient,
 ) =>
   mutationOptions({
-    mutationFn: createProactiveSetting,
+    mutationFn: (input: Parameters<typeof createProactiveSetting>[0]) =>
+      createProactiveSetting(input),
     onSuccess: settleProactive(queryClient),
   });
 
@@ -220,10 +239,17 @@ export type ProactiveChange =
   | { kind: "remove" }
   | { kind: "interval"; minutes: number };
 
+/** Every change to a check-in, Remove included, so its page can tell it was removed from there. */
+export const changeProactiveSettingMutationKey = [
+  ...proactiveKeys.settings,
+  "change",
+] as const;
+
 export const changeProactiveSettingMutationOptions = (
   queryClient: QueryClient,
 ) =>
   mutationOptions({
+    mutationKey: changeProactiveSettingMutationKey,
     /** Run now's answer, for the row to say what became of it; nothing for any other change. */
     mutationFn: async ({
       setting,

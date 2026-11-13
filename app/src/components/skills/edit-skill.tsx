@@ -65,8 +65,8 @@ export function EditSkill({ slug }: { slug: string }) {
       <header>
         <h1 className="text-2xl font-semibold">Edit skill</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Changes apply the next time someone uses <code>/{skill.slug}</code>.
-          Bots that have it keep it.
+          Changes apply the next time someone uses {skill.title}. Bots that have
+          it keep it.
         </p>
       </header>
 
@@ -89,7 +89,7 @@ export function EditSkill({ slug }: { slug: string }) {
         footer={<SkillAgents grantedTo={skill.grantedTo} slug={skill.slug} />}
         onSubmit={async (values) => {
           await saveSkill.mutateAsync(values);
-          await navigate({ search: {}, to: "/capabilities/skills" });
+          await navigate({ search: {}, to: "/skills" });
         }}
         slugLocked
         submitLabel="Save changes"

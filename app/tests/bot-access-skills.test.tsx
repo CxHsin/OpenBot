@@ -8,7 +8,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
-import { AccessSections } from "@/components/bot-profile/access";
+import { AppsSections, SkillsSections } from "@/components/bot-profile/access";
 import type { AgentProfile } from "@/lib/agents/queries";
 import { settleReactWork } from "./settle-react-work";
 
@@ -30,6 +30,9 @@ afterEach(() => {
 });
 
 const BOT: AgentProfile = {
+  assignedToMe: false,
+  runsOnOpenBotModel: false,
+  keyFromOpenBot: false,
   id: "expenses",
   name: "Expenses",
   title: "Finance",
@@ -54,11 +57,12 @@ const skill = (
   slug: string,
   ownerUserId: string | null,
   grantedTo: string[],
+  title = slug,
 ) => ({
   id: slug,
   slug,
   ownerUserId,
-  title: slug,
+  title,
   summary: `${slug} summary`,
   instructions: "",
   origin: "user",
@@ -68,8 +72,21 @@ const skill = (
 });
 
 const grants: string[] = [];
-function serving() {
+/**
+ * The server's grants, as the real one keeps them: one set behind both reads, the skills page's
+ * `grantedTo` and the Bot's own list. `givesOnListing` is the personal edition giving a Bot every
+ * skill the first time its own list is read (server/src/plugins/personal-defaults.ts).
+ */
+function serving(options: { held?: string[]; givesOnListing?: boolean } = {}) {
   grants.length = 0;
+  const held = new Set(options.held ?? ["mine-on"]);
+  const all = [
+    { slug: "mine-on", owner: "me", title: "mine-on" },
+    { slug: "mine-off", owner: "me", title: "mine-off" },
+    { slug: "theirs", owner: "other", title: "theirs" },
+    // A skill whose title is not its slug, as every skill a person writes has.
+    { slug: "tide-report", owner: "me", title: "Tide report" },
+  ];
   global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/api/plugins/grants")) {
@@ -80,7 +97,18 @@ function serving() {
       return Response.json({ apps: [] });
     }
     if (url.includes("/api/plugins/for/")) {
-      return Response.json({ tools: [], skills: [] });
+      if (options.givesOnListing) for (const { slug } of all) held.add(slug);
+      return Response.json({
+        tools: [],
+        skills: all
+          .filter(({ slug }) => held.has(slug))
+          .map(({ slug, title }) => ({
+            slug,
+            title,
+            summary: `${slug} summary`,
+            instructions: "",
+          })),
+      });
     }
     if (url.endsWith("/api/plugins")) {
       return Response.json({
@@ -88,11 +116,9 @@ function serving() {
         servers: [],
         botsMayCallBack: true,
         redirectUri: null,
-        skills: [
-          skill("mine-on", "me", ["expenses"]),
-          skill("mine-off", "me", []),
-          skill("theirs", "other", []),
-        ],
+        skills: all.map(({ slug, owner, title }) =>
+          skill(slug, owner, held.has(slug) ? ["expenses"] : [], title),
+        ),
       });
     }
     if (url.includes("/handoff")) {
@@ -119,7 +145,12 @@ function draw(agent: AgentProfile) {
   const router = createRouter({
     history: createMemoryHistory({ initialEntries: ["/"] }),
     routeTree: createRootRoute({
-      component: () => <AccessSections agent={agent} />,
+      component: () => (
+        <>
+          <AppsSections agent={agent} />
+          <SkillsSections agent={agent} />
+        </>
+      ),
     }),
   });
   return render(
@@ -140,6 +171,34 @@ test("your own skills each have a switch that reflects whether this Bot carries 
   expect(view.queryByRole("switch", { name: "theirs" })).toBeNull();
 });
 
+/*
+ * FOUND ON WINDOWS (0.3.4 release candidates): Your skills listed "/tide-report" above What it can
+ * use's "Tide report", one skill under two names. Both say its title; the section says to type /.
+ */
+test("a skill is named by its title, never listed again by its slug", async () => {
+  serving({ held: ["tide-report"] });
+  const view = draw(BOT);
+  const tide = await view.findByRole("switch", { name: "Tide report" });
+  expect(tide.getAttribute("aria-checked")).toBe("true");
+  await view.findByText("Type / in a conversation to run it.", {
+    exact: false,
+  });
+  // Once in Your skills and once in Skills it has, by the same name.
+  await waitFor(() => expect(view.getAllByText("Tide report").length).toBe(2));
+  expect(view.container.textContent).not.toContain("/tide-report");
+});
+
+test("a Bot made a moment ago shows the skills its first listing gave it", async () => {
+  // A brand-new Bot in the personal edition: nothing granted until its own list is read.
+  serving({ held: [], givesOnListing: true });
+  const view = draw(BOT);
+  const on = await view.findByRole("switch", { name: "mine-on" });
+  expect(on.getAttribute("aria-checked")).toBe("true");
+  expect(
+    view.getByRole("switch", { name: "mine-off" }).getAttribute("aria-checked"),
+  ).toBe("true");
+});
+
 test("switching a skill on grants it to this Bot", async () => {
   serving();
   const view = draw(BOT);
@@ -151,7 +210,7 @@ test("switching a skill on grants it to this Bot", async () => {
 });
 
 test("on a Bot that is not yours there are no skill switches", async () => {
-  serving();
+  serving({ held: [] });
   const view = draw({ ...BOT, mine: false, canManage: false });
   expect(await view.findByText("No apps yet")).toBeTruthy();
   expect(view.getByText(/^An admin has to add them\./)).toBeTruthy();
@@ -170,4 +229,18 @@ test("your skills failing to load says so, not that you have none", async () => 
     await view.findByText("Couldn't load your skills. Reload the page."),
   ).toBeTruthy();
   expect(view.queryByText(/No skills yet/)).toBeNull();
+});
+
+test("this Bot's own skills failing to load says so, rather than drawing every switch off", async () => {
+  serving();
+  const served = global.fetch;
+  global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) =>
+    String(input).endsWith("/api/plugins/for/expenses")
+      ? new Response(null, { status: 500 })
+      : served(input, init)) as unknown as typeof fetch;
+  const view = draw(BOT);
+  expect(
+    await view.findByText("Couldn't load your skills. Reload the page."),
+  ).toBeTruthy();
+  expect(view.queryByRole("switch", { name: "mine-on" })).toBeNull();
 });

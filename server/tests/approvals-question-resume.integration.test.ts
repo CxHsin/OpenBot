@@ -62,6 +62,8 @@ const responsibility: Responsibility = {
   instruction: "Ask what I want for lunch and record it.",
   successCriteria: "Lunch choice recorded",
   subscriptions: [],
+  recurring: false,
+  endsWhenMet: false,
   status: "active",
   progress: "",
   lastResult: null,
@@ -114,6 +116,8 @@ test("an answer to a responsibility's question resumes it with its own tools, ru
       return responsibility;
     },
     listRuns: async () => [{ id: "run-latest" }, { id: "run-older" }],
+    // Done once: nothing runs it again, so its run may complete it.
+    repeats: async () => null,
     recordProgress: async (...args: unknown[]) => {
       recorded.push(args);
       return { ok: true };
@@ -132,20 +136,24 @@ test("an answer to a responsibility's question resumes it with its own tools, ru
     responsibilities: store,
     // The same construction the process uses: the responsibility's tools bound to its latest run.
     responsibilityTurn: ({ responsibility: goal, responsibilityRunId }) => {
-      const tools = responsibilityTools({
+      const base = {
         store,
         engine: { ingest: async () => ({}) as never },
         ownerUserId: goal.ownerUserId,
         agentId: goal.agentId,
         channelId: goal.channelId,
-        ...(responsibilityRunId ? { responsibilityRunId } : {}),
-      });
+      };
+      const tools = responsibilityTools(
+        responsibilityRunId
+          ? { ...base, responsibilityRunId, repeatedWhenRunBegan: new Map() }
+          : base,
+      );
       return async (input) => {
         turn = input;
         const report = tools.find(
-          (tool) => tool.name === "report_responsibility_progress",
+          (tool) => tool.name === "report_goal_progress",
         );
-        if (!report) throw new Error("report_responsibility_progress missing");
+        if (!report) throw new Error("report_goal_progress missing");
         await report.execute({
           id: goal.id,
           summary: "Lunch: ramen",
@@ -261,7 +269,7 @@ test("an answer cannot be pointed at another person's responsibility or another 
       responsibilities: store,
       responsibilityTurn: never,
     }),
-  ).rejects.toThrow("does not belong to this responsibility");
+  ).rejects.toThrow("does not belong to this goal");
 });
 
 test("other questions keep the initiator they were asked under", async () => {

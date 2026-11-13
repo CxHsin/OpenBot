@@ -3,6 +3,7 @@ import {
   readConnectPrompt,
   SHOW_APP_ACCESS_TOOL,
 } from "@openbot/shared/connect-prompt";
+import { setEdition } from "../src/edition";
 import type { AppAccess, AppAccessState } from "../src/plugins/app-access";
 import { appAccessTools } from "../src/plugins/app-access-tool";
 import type { AppInspection } from "../src/plugins/plugin-store/app-access";
@@ -111,11 +112,92 @@ describe("show_app_access", () => {
     },
   );
 
+  test.each(["disabled", "not_granted"] as const)(
+    "in the personal edition, %s tells the model the card connects it, not to ask an administrator",
+    async (state) => {
+      setEdition("personal");
+      try {
+        const { tool } = toolOver(access(state));
+        const message =
+          readConnectPrompt(await tool.execute({ app: "gmail" }))?.message ??
+          "";
+        expect(message).toMatch(/offers Connect/);
+        expect(message).not.toMatch(/administrator/);
+      } finally {
+        setEdition("team");
+      }
+    },
+  );
+
+  /*
+   * The button the personal edition's card draws for each, as `PersonalConnectAction` and
+   * `AdminAction` label it. Gmail on a fresh install is the first row: a broker app nobody added has
+   * no auth scheme yet, so the card reads Turn on, and Connect only comes after it.
+   */
+  test.each([
+    {
+      card: "Turn on, then Connect (fresh Gmail)",
+      access: { state: "disabled", connect: null, authScheme: null },
+      says: /offers Turn on\. If the card then offers Connect, they press that next/,
+    },
+    {
+      card: "Connect (an app that signs in)",
+      access: { state: "disabled", connect: "consent" },
+      says: /offers Connect, which turns it on and connects it in one press/,
+    },
+    {
+      card: "Set up (an app that takes a key)",
+      access: { state: "not_granted", connect: "key" },
+      says: /offers Set up, which opens the page where they add its key/,
+    },
+    {
+      card: "Set it up (no broker key yet)",
+      access: {
+        state: "disabled",
+        connect: null,
+        unavailable: "composio_unconfigured",
+      },
+      says: /isn't set up yet\. The card in front of the person offers Set it up/,
+    },
+    {
+      card: "Connect (on, not connected)",
+      access: { state: "not_connected" },
+      says: /offers Connect; ask them/,
+    },
+  ] as const)(
+    "in the personal edition, the model is told the card's own button: $card",
+    async ({ access: overrides, says }) => {
+      setEdition("personal");
+      try {
+        const { tool } = toolOver({
+          ...access(overrides.state),
+          ...overrides,
+        } as AppAccess);
+        const message =
+          readConnectPrompt(await tool.execute({ app: "gmail" }))?.message ??
+          "";
+        expect(message).toMatch(says);
+        expect(message).not.toMatch(/administrator/);
+      } finally {
+        setEdition("team");
+      }
+    },
+  );
+
   test("an app nobody can name gets a plain sentence and no card", async () => {
     const { tool } = toolOver(null);
     const answer = await tool.execute({ app: "Frobnicator" });
     expect(readConnectPrompt(answer)).toBeNull();
     expect(answer).toContain("no app called Frobnicator");
+  });
+
+  test("tells the model an MCP server can be added by its address, never that it can't", async () => {
+    const { tool } = toolOver(null);
+    expect(tool.description).toContain(
+      "never say a server cannot be used by its URL",
+    );
+    const answer = await tool.execute({ app: "Figma" });
+    expect(answer).toContain("add it on Connections with Add server");
   });
 
   test("arguments that name no app are refused before the store is asked", async () => {

@@ -2,6 +2,10 @@ import {
   type HeadlessTool,
   HeadlessToolSuspension,
 } from "@openbot/toolkit/headless-tools";
+import {
+  SECRET_FIELD_BY_REF,
+  withFinishedAt,
+} from "@openbot/shared/computer-control";
 import { z } from "zod";
 import { currentApprovalContext } from "../approvals/types";
 import { type AuditStore, recordAuditEvent } from "../audit";
@@ -71,7 +75,8 @@ export function createHeadlessComputerTools(options: {
         if (context.signal.aborted)
           throw new Error("The computer action was stopped.");
         try {
-          return await execute(input, context);
+          // When it finished, for Activity: the one a person allowed and every step after it run here.
+          return withFinishedAt(await execute(input, context));
         } catch (error) {
           /*
            * A cold start that outlasted the wait is answered, not thrown.
@@ -258,7 +263,7 @@ export function createHeadlessComputerTools(options: {
     ),
     tool(
       "computer_run_command",
-      "Run a bash shell command in your workspace. Pipes and && work; long output is truncated and long commands are stopped. For package installation check id -u first: as root (0), use apt-get directly; otherwise use sudo apt-get. If installation is refused, say so rather than retrying.",
+      "Run a bash shell command in your workspace. Pipes and && work; long output is truncated and long commands are stopped. For package installation check id -u first: as root (0), use apt-get directly; otherwise use sudo openbot-apt update && sudo openbot-apt install <package>, which takes package names and nothing else, not sudo apt-get. If installation is refused, say so rather than retrying.",
       z.strictObject({ command: text }),
       async (input, { signal }) => ({
         ok: true,
@@ -277,7 +282,7 @@ export function createHeadlessComputerTools(options: {
     ),
     tool(
       "computer_request_secret",
-      "Ask the person to enter one secret directly into the focused field. Click the field first. You must never receive the secret; this unattended turn pauses for the person.",
+      `Ask the person to enter one secret directly into a field. ${SECRET_FIELD_BY_REF} You must never receive the secret; this unattended turn pauses for the person.`,
       z.strictObject({ label: text, ref, snapshotId }),
       async (input) =>
         waiting(

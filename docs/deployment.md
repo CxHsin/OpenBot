@@ -5,7 +5,7 @@ drive, and it can carry its own PostgreSQL as well. It does what it does on a la
 
 ```sh
 # Every release publishes this image, so a deployment needs no clone and no build.
-# `latest` is the most recent; a version tag such as `:v0.0.9` pins one.
+# `latest` is the most recent; a version tag such as `:v1.0.1` pins one.
 image=ghcr.io/copilotkit/openbot:latest
 
 # A database you already run.
@@ -19,6 +19,20 @@ docker run -p 3001:3001 --env-file .env \
 `docker build -t openbot .` from a clone produces the same thing, for anyone deploying a tree of
 their own. What a release publishes is digest-pinned in its `container-images.json`, and deploying
 those digests rather than a moving tag is what [releasing.md](releasing.md) recommends.
+
+## Checking an image's signature
+
+OpenBot's images are signed with OpenBot's own key. The public half is [cosign.pub](cosign.pub), and
+[cosign](https://docs.sigstore.dev/cosign/) checks an image against it before you deploy:
+
+```sh
+cosign verify --key docs/cosign.pub --insecure-ignore-tlog=true ghcr.io/copilotkit/openbot-server:main
+```
+
+The same command checks `ghcr.io/copilotkit/openbot`, `openbot-agent-computer` and
+`openbot-supervisor`, at any tag published from now on; images from v1.0.2 and earlier carry no
+signature. The signatures are not recorded in a public transparency log, which is what
+`--insecure-ignore-tlog=true` tells cosign to expect. The key is what proves the image is OpenBot's.
 
 ## What is in the image, and what is not
 
@@ -35,7 +49,7 @@ a redeploy takes the audit trail with it, and the audit trail is the product.
 
 **Mount the parent, not `/var/lib/postgresql/data`.** On any platform whose volume is an ext4 mount,
 and that is most of them, the mount arrives holding a `lost+found` directory. `initdb` will not
-initialise into a directory that has anything in it, so mounting it directly on the data directory
+initialize into a directory that has anything in it, so mounting it directly on the data directory
 leaves the cluster uncreated — and because `api` waits on `postgres` and `migrate`, the container
 starts, the platform reports the deploy a success, and the URL serves a 502. Mounting the parent
 leaves `data` as an ordinary subdirectory, which is what PostgreSQL asks for. A Docker named volume
@@ -125,7 +139,7 @@ and the fix would not be available.
 | `EMBEDDED_POSTGRES` | `on` to run the database inside the container. Off by default |
 | `KEY_ENCRYPTION_KEY` | base64 32 bytes. `openssl rand -base64 32`. The example key is refused in production |
 | `INTELLIGENCE_API_URL`, `INTELLIGENCE_GATEWAY_WS_URL`, `INTELLIGENCE_API_KEY` | CopilotKit Intelligence. A free plan is available and it can be self-hosted |
-| `COPILOTKIT_LICENSE_TOKEN` | optional. Managed Intelligence issues none; set it for a self-hosted Intelligence, which needs the same licence on its own deployment too |
+| `COPILOTKIT_LICENSE_TOKEN` | optional. Managed Intelligence issues none; set it for a self-hosted Intelligence, which needs the same license on its own deployment too |
 | a model key | `OPENAI_API_KEY`, or the provider you configured |
 
 `COMPUTER_TOKEN` is generated at start if you do not set one. Both processes that need it are inside

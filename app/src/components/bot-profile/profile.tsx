@@ -7,10 +7,9 @@ import {
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import type * as React from "react";
-import { useState } from "react";
 import { AbstractAvatar } from "@/components/agents/abstract-avatar";
-import { BotNeedsYou } from "@/components/approvals/waiting";
 import { PageRows, PageSection } from "@/components/layout/page-shell";
+import { BotNeedsYou } from "@/components/needs-you/board";
 import { DoneTasks, useNeedsYou } from "@/components/needs-you/needs-you";
 import { SharedAppNotice } from "@/components/plugins/shared-app-notice";
 import { Button } from "@/components/ui/button";
@@ -32,6 +31,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import type { AgentProfile } from "@/lib/agents/queries";
+import { shownSubtitle } from "@/lib/agents/subtitle";
 import {
   setBotNotifyMutationOptions,
   setBotPausedMutationOptions,
@@ -40,6 +40,10 @@ import {
   type BotNotify,
   botLifecycleQueryOptions,
 } from "@/lib/bot-lifecycle/queries";
+import {
+  requestNotificationPermission,
+  useNotificationPermission,
+} from "@/lib/notifications/permission";
 import { queryClient } from "@/query-client";
 import { BotActivityGlance, BotActivityRow } from "./activity";
 import { BotPausedBanner } from "./pause-banner";
@@ -69,22 +73,20 @@ export function BotProfile({
   const { done } = useNeedsYou(agent.id);
   const pause = useMutation(setBotPausedMutationOptions(queryClient));
   const notify = useMutation(setBotNotifyMutationOptions(queryClient));
-  const [permission, setPermission] = useState<string>(() => {
-    try {
-      return typeof Notification === "undefined"
-        ? "unsupported"
-        : Notification.permission;
-    } catch {
-      return "unsupported";
-    }
-  });
+  // The browser's answer, shared with the prompt a conversation offers, so a yes there shows here.
+  const permission = useNotificationPermission();
 
   return (
     <>
       <div className="mt-6 flex items-center gap-3">
         <AbstractAvatar name={agent.name} seed={agent.avatarSeed} size={40} />
         <div className="min-w-0">
-          {agent.title && <p className="truncate font-medium">{agent.title}</p>}
+          {/* Up to three lines, so a phone shows the whole of a subtitle like the starter's. */}
+          {agent.title && (
+            <p className="line-clamp-3 text-pretty font-medium">
+              {shownSubtitle(agent.title)}
+            </p>
+          )}
           <p className="line-clamp-2 text-muted-foreground text-sm">
             {agent.roleDescription}
           </p>
@@ -121,7 +123,7 @@ export function BotProfile({
                 <ItemDescription>
                   {lifecycle.data.paused
                     ? "Paused. Nothing runs for you until you turn it back on."
-                    : "Runs its routines, responsibilities, hand-offs and follow-ups for you."}
+                    : "Works on its goals, routines, hand-offs and follow-ups for you."}
                 </ItemDescription>
               </ItemContent>
               <ItemActions>
@@ -164,7 +166,14 @@ export function BotProfile({
                   <SelectTrigger aria-label="Notifications">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent>
+                  {/* Below the control and level with its right edge, as wide as the longest label.
+                      Laid over the trigger at its width, "Only when it needs me" was cut off and the
+                      list ran past the card's edge. */}
+                  <SelectContent
+                    align="end"
+                    alignItemWithTrigger={false}
+                    className="w-max min-w-(--anchor-width)"
+                  >
                     {(Object.keys(NOTIFY_LABEL) as BotNotify[]).map((value) => (
                       <SelectItem key={value} value={value}>
                         {NOTIFY_LABEL[value]}
@@ -190,13 +199,7 @@ export function BotProfile({
                   </ItemContent>
                   <ItemActions>
                     <Button
-                      onClick={async () => {
-                        try {
-                          setPermission(await Notification.requestPermission());
-                        } catch {
-                          setPermission("unsupported");
-                        }
-                      }}
+                      onClick={() => void requestNotificationPermission()}
                       size="sm"
                       variant="outline"
                     >

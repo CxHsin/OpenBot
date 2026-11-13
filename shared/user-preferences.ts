@@ -14,7 +14,7 @@ export const SKIN_IDS = [
   "openbot",
   "openduet",
   "opendots",
-  "openmuse",
+  "openfuse",
 ] as const;
 
 export type SkinId = (typeof SKIN_IDS)[number];
@@ -25,7 +25,24 @@ export function isSkinId(value: unknown): value is SkinId {
   return SKIN_IDS.some((id) => id === value);
 }
 
+/**
+ * Ids a skin was saved under before it was renamed, and the skin each one is now. Accounts and
+ * browsers keep whatever was saved, so these are read as the new id rather than rewritten, and a
+ * build from before the rename still finds the id it knows.
+ */
+export const RENAMED_SKIN_IDS = {
+  openmuse: "openfuse",
+} as const satisfies Record<string, SkinId>;
+
+/** The skin a saved value means today: its own id, a renamed skin's new id, or undefined. */
+export function currentSkinId(value: unknown): SkinId | undefined {
+  if (isSkinId(value)) return value;
+  return Object.entries(RENAMED_SKIN_IDS).find(([old]) => old === value)?.[1];
+}
+
 export type UserPreferences = {
+  /** Server-owned first new eligible conversation; shared by both starter Bots. */
+  starterTourChannelId?: string;
   /** Set by profile saves so choosing a name finishes the first-run prompt. */
   profileNameSet?: boolean;
   messageListEmphasis: MessageListEmphasis;

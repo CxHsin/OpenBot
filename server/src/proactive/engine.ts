@@ -75,6 +75,7 @@ import {
 } from "./window";
 
 export { PROACTIVE_RUN_KIND };
+
 /**
  * How long a check-in may hold its queue item and its `running` row. A turn is cut off at three
  * minutes, so anything still running at ten belongs to a replica that stopped.
@@ -103,7 +104,11 @@ export type ProactiveScope = {
 
 export type ProactiveEngineDeps = {
   store: ProactiveStore;
-  memory: Pick<MemoryStore, "formMemory">;
+  /**
+   * Where a check-in's `form_memory` writes. Absent in an edition without memory
+   * (`editionHasMemory`), and then a check-in is offered no `form_memory` and told nothing about it.
+   */
+  memory?: Pick<MemoryStore, "formMemory">;
   queue: WorkQueue;
   owner: string;
   runTurn: TurnRunner;
@@ -347,6 +352,7 @@ export function createProactiveEngine(deps: ProactiveEngineDeps) {
       },
     });
     let memories = 0;
+    const memory = deps.memory;
     return [
       tool(
         "suggest_next_step",
@@ -404,35 +410,40 @@ export function createProactiveEngine(deps: ProactiveEngineDeps) {
           return { cleared: cleared.id };
         },
       ),
-      tool(
-        "form_memory",
-        "Remember a durable fact about the person or their work that you read in this run. Provenance is recorded from the read itself and the person reviews it.",
-        proactiveMemoryInputSchema,
-        async (input) => {
-          if (memories >= MAX_MEMORIES_PER_RUN)
-            throw new ProactiveRefusedError(
-              `This run already formed ${MAX_MEMORIES_PER_RUN} memories.`,
-            );
-          const read = readMatching(
-            await deps.store.readsFor(runId),
-            input.sourceTool,
-          );
-          if (!read)
-            throw new ProactiveRefusedError(
-              "A memory needs a source: name a tool you successfully read with in this run.",
-            );
-          const server = await serverFor(catalogue, read.ref);
-          memories += 1;
-          return deps.memory.formMemory(setting.ownerUserId, {
-            agentId: setting.agentId,
-            content: input.content,
-            sourceApp: server?.title ?? read.ref.split("/")[0] ?? read.ref,
-            sourceRef: read.ref,
-            ...(input.sourceLink ? { sourceLink: input.sourceLink } : {}),
-            observedAt: read.at,
-          });
-        },
-      ),
+      ...(memory
+        ? [
+            tool(
+              "form_memory",
+              "Remember a durable fact about the person or their work that you read in this run. Provenance is recorded from the read itself and the person reviews it.",
+              proactiveMemoryInputSchema,
+              async (input) => {
+                if (memories >= MAX_MEMORIES_PER_RUN)
+                  throw new ProactiveRefusedError(
+                    `This run already formed ${MAX_MEMORIES_PER_RUN} memories.`,
+                  );
+                const read = readMatching(
+                  await deps.store.readsFor(runId),
+                  input.sourceTool,
+                );
+                if (!read)
+                  throw new ProactiveRefusedError(
+                    "A memory needs a source: name a tool you successfully read with in this run.",
+                  );
+                const server = await serverFor(catalogue, read.ref);
+                memories += 1;
+                return memory.formMemory(setting.ownerUserId, {
+                  agentId: setting.agentId,
+                  content: input.content,
+                  sourceApp:
+                    server?.title ?? read.ref.split("/")[0] ?? read.ref,
+                  sourceRef: read.ref,
+                  ...(input.sourceLink ? { sourceLink: input.sourceLink } : {}),
+                  observedAt: read.at,
+                });
+              },
+            ),
+          ]
+        : []),
     ];
   }
 
@@ -504,7 +515,7 @@ export function createProactiveEngine(deps: ProactiveEngineDeps) {
       return { skip: "paused" };
     if (!(await allowed(setting.ownerUserId))) return { skip: "off_admin" };
     if (
-      (await deps.store.runsToday(setting.id)) >=
+      (await deps.store.runsToday(setting.ownerUserId, setting.agentId)) >=
       (await dailyRuns(setting.agentId))
     )
       return { skip: "capped" };
@@ -551,8 +562,20 @@ export function createProactiveEngine(deps: ProactiveEngineDeps) {
     // Read before this run is in the ledger, so the window opens at a check-in before it.
     const lastRead = await deps.store.windowStart(setting.id);
     const threadId = deps.mintThreadId();
-    if (!(await deps.store.beginRun({ id: runId, setting, trigger, threadId })))
-      return skip(setting, runId, trigger, "busy");
+    const admitted = await deps.store.beginRun({
+      id: runId,
+      setting,
+      trigger,
+      threadId,
+      dailyLimit: await dailyRuns(setting.agentId),
+    });
+    if (admitted !== true)
+      return skip(
+        setting,
+        runId,
+        trigger,
+        admitted === "capped" ? "capped" : "busy",
+      );
     /*
      * FROM HERE THE RUN IS IN THE LEDGER AS RUNNING, and every step until it is closed can fail on
      * its own: a database call that drops its connection is enough. Left running, the row would make
@@ -578,6 +601,7 @@ export function createProactiveEngine(deps: ProactiveEngineDeps) {
         contextOf(prior, setting.agentId),
         trigger,
         gate.apps.map((app) => app.title),
+        deps.memory !== undefined,
       );
       let thrown: unknown = null;
       try {
@@ -747,7 +771,12 @@ export function createProactiveEngine(deps: ProactiveEngineDeps) {
       ).filter((name) => !ownNames.has(name));
       return [...own, ...refusalsFor([...new Set(denied)])];
     },
-    async create(ownerUserId: string, input: unknown) {
+    /** `options` as the store takes them: `refuseExisting` for a caller that asked for a new one. */
+    async create(
+      ownerUserId: string,
+      input: unknown,
+      options: { refuseExisting?: boolean } = {},
+    ) {
       const parsed = input as { agentId?: unknown; channelId?: unknown };
       if (
         typeof parsed?.agentId !== "string" ||
@@ -761,7 +790,12 @@ export function createProactiveEngine(deps: ProactiveEngineDeps) {
         throw new ProactiveRefusedError(
           "Choose one of your Bots and a conversation it's in.",
         );
-      return deps.store.create(ownerUserId, input, deps.mintThreadId());
+      return deps.store.create(
+        ownerUserId,
+        input,
+        deps.mintThreadId(),
+        options,
+      );
     },
     /**
      * Check in now, because the person asked. Either it is queued, or they are told plainly why it

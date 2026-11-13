@@ -271,6 +271,28 @@ test("a component-only queued result is still sent", async () => {
     text: expect.stringContaining("已完成检查"),
   });
 });
+
+test("a turn knows where its message was written, so its surface can be told", async () => {
+  const queued = fixture();
+  await queued.router.sweep("delivery.inbound");
+  const native = fixture();
+  native.inbox.source = "native";
+  await native.router.sweep("delivery.inbound");
+  const paired = fixture();
+  await paired.router.converse({
+    transport: "teams",
+    realm: "T",
+    identity: "U",
+    externalId: "m1",
+    text: "Hi",
+    signal: new AbortController().signal,
+  });
+  expect(
+    [queued, native, paired].map(
+      (f) => (f.calls[0] as { source?: unknown }).source,
+    ),
+  ).toEqual(["slack", "native", "teams"]);
+});
 test("revoked source ownership and lost lease cannot execute turns or sends", async () => {
   const f = fixture();
   f.revoke();

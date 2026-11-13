@@ -1,12 +1,6 @@
 import {
-  IconBrain,
-  IconChecks,
   IconChevronRight,
-  IconClock,
   IconDeviceMobile,
-  IconPuzzle,
-  IconSettings,
-  IconTargetArrow,
   IconUsersGroup,
 } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
@@ -23,7 +17,6 @@ import {
 } from "@/components/ui/item";
 import { Separator } from "@/components/ui/separator";
 import {
-  accessSummary,
   countLabel,
   memorySummary,
   reachSummary,
@@ -34,99 +27,146 @@ import type { AgentProfile } from "@/lib/agents/queries";
 import { approvalInboxOptions, ruleCoversBot } from "@/lib/approvals";
 import { currentUserQueryOptions } from "@/lib/auth/queries";
 import { deliveryQueryOptions } from "@/lib/delivery";
+import {
+  deploymentCapabilitiesQueryOptions,
+  useOffersMemory,
+} from "@/lib/deployment/queries";
+import { desktopShell } from "@/lib/desktop/shell";
 import { memorySourcesQueryOptions } from "@/lib/memory";
 import { agentPluginsQueryOptions } from "@/lib/plugins/queries";
+import { primitive, SETUP } from "@/lib/primitives";
 import { proactiveSettingsQueryOptions } from "@/lib/proactive";
 import { responsibilitiesQueryOptions } from "@/lib/responsibilities";
+import { mergeRoutines } from "@/lib/routines/merged";
 import { routinesQueryOptions } from "@/lib/routines/queries";
 import { teamBotsQueryOptions } from "@/lib/team-bots";
 import { connectorCount } from "./access";
 
 type Row = {
   to:
-    | "/bots/$agentId/responsibilities"
-    | "/bots/$agentId/reach"
-    | "/bots/$agentId/memory"
-    | "/bots/$agentId/approvals"
     | "/bots/$agentId/routines"
-    | "/bots/$agentId/access"
+    | "/bots/$agentId/memory"
+    | "/bots/$agentId/skills"
+    | "/bots/$agentId/apps"
+    | "/bots/$agentId/computer"
+    | "/bots/$agentId/approvals"
+    | "/bots/$agentId/setup"
     | "/bots/$agentId/sharing"
-    | "/bots/$agentId/setup";
+    | "/bots/$agentId/reach";
   title: string;
-  icon: typeof IconClock;
+  icon: React.ComponentType;
   summary: string;
 };
 
 /**
- * One row per area of this Bot's configuration, each stating its current answer and opening the page
- * that changes it. Sharing is for its owner, administrators, and anyone it is published to.
+ * Settings for this Bot: the things a Bot has, in the fixed order (`lib/primitives.ts`), then its
+ * Setup, then in the team edition Sharing and Reaching you. Each row states its current answer and
+ * opens the page that changes it.
+ *
+ * Both editions draw the same rows. A row shows only where it has something to set
+ * (`docs/how-openbot-works.md`): Conversations and Activity are never rows, Memory only where
+ * OpenBot offers it, and Computer only where this Bot has something of its own there (folders on
+ * this computer inside OpenBot Desktop, its browser in the personal edition, or a computer of its
+ * own for someone who may list computers).
  */
 export function BotSettingsRows({ agent }: { agent: AgentProfile }) {
   const me = useQuery(currentUserQueryOptions()).data;
+  const personal =
+    useQuery(deploymentCapabilitiesQueryOptions()).data?.edition === "personal";
+  const memory = useOffersMemory();
   const routines = useQuery(routinesQueryOptions());
-  const plugins = useQuery(agentPluginsQueryOptions(agent.id));
-  const teamBots = useQuery(teamBotsQueryOptions());
-  const published = teamBots.data?.teamBots.find((bot) => bot.id === agent.id);
-  // Its owner and administrators change it there; anyone it is published to finds its link there.
-  const canShare =
-    agent.mine || me?.role === "admin" || published !== undefined;
-
   const goals = useQuery(responsibilitiesQueryOptions());
-  const reach = useQuery(deliveryQueryOptions());
-  const sources = useQuery(memorySourcesQueryOptions());
-  const research = useQuery(proactiveSettingsQueryOptions());
+  const checkIns = useQuery(proactiveSettingsQueryOptions());
+  const sources = useQuery({ ...memorySourcesQueryOptions(), enabled: memory });
+  const plugins = useQuery(agentPluginsQueryOptions(agent.id));
   const approvals = useQuery(approvalInboxOptions());
+  const teamBots = useQuery({ ...teamBotsQueryOptions(), enabled: !personal });
+  const reach = useQuery({ ...deliveryQueryOptions(), enabled: !personal });
+  const published = teamBots.data?.teamBots.find((bot) => bot.id === agent.id);
+  const admin = me?.role === "admin";
+  // Its owner and admins change it there; anyone it is published to finds its link there.
+  const canShare =
+    !personal && (agent.mine || admin || published !== undefined);
+  const desktop = desktopShell() !== null;
+  const hasComputer = desktop || personal || (agent.isolated && admin);
+
+  const row = (
+    id: "routines" | "memory" | "skills" | "apps" | "computer" | "approvals",
+    to: Row["to"],
+    summary: string,
+  ): Row => ({
+    to,
+    title: primitive(id).label,
+    icon: primitive(id).icon,
+    summary,
+  });
 
   const rows: Row[] = [
-    {
-      to: "/bots/$agentId/responsibilities",
-      title: "Responsibilities",
-      icon: IconTargetArrow,
-      summary: goals.data
+    row(
+      "routines",
+      "/bots/$agentId/routines",
+      // Its routines, goals and check-ins, counted as the Routines list draws them.
+      routines.data && goals.data && checkIns.data
         ? countLabel(
-            goals.data.filter(
-              (goal) => goal.agentId === agent.id && goal.status === "active",
-            ).length,
-            "active",
-            "active",
-            "None active",
+            mergeRoutines({
+              routines: routines.data.routines,
+              goals: goals.data,
+              checkIns: checkIns.data,
+              agentId: agent.id,
+            }).length,
+            "routine",
+            "routines",
+            "No routines",
           )
         : "",
-    },
-    {
-      to: "/bots/$agentId/reach",
-      title: "Reaching you",
-      icon: IconDeviceMobile,
-      summary: reach.data
-        ? reachSummary(
-            reach.data.bindings
-              .filter(
-                (binding) => binding.enabled && binding.agentId === agent.id,
-              )
-              .map((binding) => binding.transport),
-          )
+    ),
+    ...(memory
+      ? [
+          row(
+            "memory",
+            "/bots/$agentId/memory",
+            sources.data
+              ? memorySummary(
+                  sources.data.filter((source) => source.agentId === agent.id)
+                    .length,
+                )
+              : "",
+          ),
+        ]
+      : []),
+    row(
+      "skills",
+      "/bots/$agentId/skills",
+      plugins.data
+        ? countLabel(plugins.data.skills.length, "skill", "skills", "No skills")
         : "",
-    },
-    {
-      to: "/bots/$agentId/memory",
-      title: "Memory",
-      icon: IconBrain,
-      summary:
-        sources.data && research.data
-          ? memorySummary(
-              sources.data.filter((source) => source.agentId === agent.id)
-                .length,
-              research.data.some(
-                (setting) => setting.agentId === agent.id && setting.enabled,
-              ),
-            )
-          : "",
-    },
-    {
-      to: "/bots/$agentId/approvals",
-      title: "Approval rules",
-      icon: IconChecks,
-      summary: approvals.data
+    ),
+    row(
+      "apps",
+      "/bots/$agentId/apps",
+      plugins.data
+        ? countLabel(connectorCount(plugins.data), "app", "apps", "No apps")
+        : "",
+    ),
+    ...(hasComputer
+      ? [
+          row(
+            "computer",
+            "/bots/$agentId/computer",
+            agent.isolated
+              ? agent.isolationActive
+                ? "A computer of its own"
+                : "Shares a computer for now"
+              : desktop
+                ? "Folders on this computer, and its browser"
+                : "Its browser on your computer",
+          ),
+        ]
+      : []),
+    row(
+      "approvals",
+      "/bots/$agentId/approvals",
+      approvals.data
         ? countLabel(
             approvals.data.rules.filter(
               (rule) =>
@@ -137,31 +177,12 @@ export function BotSettingsRows({ agent }: { agent: AgentProfile }) {
             "No rules",
           )
         : "",
-    },
+    ),
     {
-      to: "/bots/$agentId/routines",
-      title: "Routines",
-      icon: IconClock,
-      summary: routines.data
-        ? countLabel(
-            routines.data.routines.filter((row) => row.agentId === agent.id)
-              .length,
-            "routine",
-            "routines",
-            "No routines",
-          )
-        : "",
-    },
-    {
-      to: "/bots/$agentId/access",
-      title: "Skills and access",
-      icon: IconPuzzle,
-      summary: plugins.data
-        ? accessSummary(
-            plugins.data.skills.length,
-            connectorCount(plugins.data),
-          )
-        : "",
+      to: "/bots/$agentId/setup",
+      title: SETUP.label,
+      icon: SETUP.icon,
+      summary: setupSummary(agent, personal ? "personal" : "team"),
     },
     ...(canShare
       ? [
@@ -175,12 +196,26 @@ export function BotSettingsRows({ agent }: { agent: AgentProfile }) {
           },
         ]
       : []),
-    {
-      to: "/bots/$agentId/setup",
-      title: "Setup",
-      icon: IconSettings,
-      summary: setupSummary(agent),
-    },
+    // Slack, Teams and text: the personal edition has none of them.
+    ...(personal
+      ? []
+      : [
+          {
+            to: "/bots/$agentId/reach" as const,
+            title: "Reaching you",
+            icon: IconDeviceMobile,
+            summary: reach.data
+              ? reachSummary(
+                  reach.data.bindings
+                    .filter(
+                      (binding) =>
+                        binding.enabled && binding.agentId === agent.id,
+                    )
+                    .map((binding) => binding.transport),
+                )
+              : "",
+          },
+        ]),
   ];
 
   return (

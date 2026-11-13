@@ -10,10 +10,8 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { UserPreferences } from "@openbot/shared/user-preferences";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
-import {
-  SELF_HOST_URL,
-  SelfHostBanner,
-} from "@/components/layout/self-host-banner";
+import { TeamFeaturesDialog } from "@/components/edition/team-features-dialog";
+import { SelfHostBanner } from "@/components/layout/self-host-banner";
 import { authKeys } from "@/lib/auth/queries";
 import { deploymentKeys } from "@/lib/deployment/queries";
 import { userPreferencesQueryOptions } from "@/lib/settings/message-list";
@@ -22,7 +20,13 @@ const originalFetch = globalThis.fetch;
 const clients: QueryClient[] = [];
 let response: () => Promise<Response>;
 let requests: { path: string; method: string; body: unknown }[];
-beforeAll(() => GlobalRegistrator.register({ url: "http://localhost/" }));
+// The dialog's booking calendar keeps its address but never fetches it: no test reaches Calendly.
+beforeAll(() =>
+  GlobalRegistrator.register({
+    url: "http://localhost/",
+    settings: { navigation: { disableChildFrameNavigation: true } },
+  }),
+);
 beforeEach(() => {
   requests = [];
   response = async () =>
@@ -97,21 +101,25 @@ function setup({
   const view = render(
     <QueryClientProvider client={client}>
       <SelfHostBanner />
+      <TeamFeaturesDialog />
     </QueryClientProvider>,
   );
   return { client, view };
 }
 
-test("offers self-hosting with a link CopilotKit can tell came from the app", () => {
+test("offers self-hosting, and Book a call opens the OpenBot for Business dialog in the app", async () => {
   const { view } = setup();
   expect(
     view.getByText("Self-host OpenBot for your organization."),
   ).toBeTruthy();
-  const link = view.getByRole("link", { name: "Talk to an engineer" });
-  expect(link.getAttribute("href")).toBe(SELF_HOST_URL);
-  expect(SELF_HOST_URL).toContain("ref=openbot_app");
-  expect(link.getAttribute("target")).toBe("_blank");
-  expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  expect(view.queryByRole("link", { name: "Book a call" })).toBeNull();
+
+  fireEvent.click(view.getByRole("button", { name: "Book a call" }));
+
+  const dialog = await view.findByRole("dialog", {
+    name: "OpenBot for Business",
+  });
+  expect(dialog.querySelector('iframe[title="Booking calendar"]')).toBeTruthy();
 });
 
 test("stays hidden for somebody who closed it", () => {

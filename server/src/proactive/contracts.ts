@@ -77,6 +77,9 @@ export type ProactiveSettingPayload = {
   channelId: string;
   threadId: string;
   focus: string;
+  /** What this check-in watches, in the person's words; empty for one that watches everything. */
+  subject: string;
+  sourceLink: string | null;
   enabled: boolean;
   intervalMinutes: number;
   nextRunAt: string;
@@ -245,6 +248,12 @@ export type BotAttentionPayload = {
   /** Open items from this Bot's check-ins. */
   items: number;
   tasks: Omit<BotTaskCounts, "agentId">;
+  /**
+   * The conversation of the newest thing this Bot waits on the person for, while it waits on them
+   * for anything: where a notice about it opens. Null when it waits on nothing, or on nothing that
+   * belongs to a conversation.
+   */
+  waitingIn: string | null;
 };
 
 /**

@@ -1,12 +1,17 @@
+import { isOpenBotActor } from "@openbot/shared/openbot-actor";
 import { and, eq, sql } from "drizzle-orm";
 import type { ApprovalGate } from "../../approvals/types";
-import type { AuditStore } from "../../audit";
+import {
+  type AuditInitiator,
+  type AuditStore,
+  DEPLOYMENT_INITIATOR,
+} from "../../audit";
+import type { EntraTokens } from "../../auth/entra-refusal";
 import type { ActionPolicy } from "../../computer/policy";
 import type {
   CredentialSecretReader,
   CredentialStore,
 } from "../../credentials";
-import type { EntraTokens } from "../../auth/entra-refusal";
 import type { Database } from "../../db/client";
 import { isQueryFailure, withoutStatement } from "../../db/query-failure";
 import { pendingAuthorizations } from "../../db/schema";
@@ -142,6 +147,11 @@ export type ServerRecord = {
    */
   dynamicClient: boolean;
   /**
+   * A server added by URL that signs each person in: it answered with an OAuth challenge when it was
+   * added, so each person connects their own account and every call runs on their token.
+   */
+  signIn: boolean;
+  /**
    * How this server's authorization config was created, for the brokered rows that have one.
    *
    * WHAT WAS WRITTEN DOWN WHEN SOMEBODY ENABLED THE APP, NOT WHAT THE CATALOGUE PUBLISHES TODAY.
@@ -173,6 +183,16 @@ export type ServerRecord = {
    * connected would tell the page something that changes nothing a call does.
    */
   sharedVendorConnected: boolean;
+  /**
+   * Whether this app may only hold the deployment's one shared account, never a person's own.
+   *
+   * True for an app connected on this deployment's own OAuth client (a server-to-server grant):
+   * what a person would type is a store subdomain and the credential is the deployment's, so a
+   * personal account would be the organization's access under one person's name. Read off the
+   * recorded scheme by `sharedAccountOnly`, so a screen decides what to offer from this and never
+   * from the app's name. The connect route refuses a personal account here whatever a screen draws.
+   */
+  sharedOnly: boolean;
   /**
    * Whether a call to this server goes out on the asking person's own credential: their own grant
    * at the vendor, or their own account behind a broker. See `ServerAccess.ownCredential`.
@@ -276,6 +296,13 @@ export type GrantedPlugins = {
     toolName: string;
     description: string;
     inputSchema: Record<string, unknown>;
+    /** The app marks it destructive (`mcpTools.destructive`): OpenBot always asks before it runs. */
+    destructive: boolean;
+    /**
+     * It only reads, by the rule a call to it is gated with (`classifyTool`). Absent reads as a
+     * write, so a store that does not say never has an action offered as a read.
+     */
+    read?: boolean;
   }[];
   skills: {
     slug: string;
@@ -652,6 +679,16 @@ export function storableSchema(
  * reason comes back in `skipped`, once, spelled as the vendor listed it — so the caller can say
  * which actions were not recorded rather than leave their absence for somebody to notice.
  */
+/**
+ * The current reading of a vendor's listing, recorded on an app's row by every refresh that stores
+ * its tools (`mcpServers.listingRevision`). Raise it when what is recorded from the same listing
+ * changes, and every app of the active broker is listed again once at the next start.
+ *
+ * 1: a broker's silence is `unclassified` and not `destructive` (Arcade had recorded it as
+ * destructive), and a Composio action with no label is `unclassified` too.
+ */
+export const LISTING_REVISION = 1;
+
 export function storableTools(
   serverId: string,
   listed: ListedTool[],
@@ -717,6 +754,8 @@ export function storableTools(
        */
       effect: tool.effect ?? null,
       destructive: tool.destructive ?? false,
+      // A broker said nothing about it; see `mcpTools.unclassified`.
+      unclassified: tool.unclassified ?? false,
       // The server's own read-only label, kept apart from `effect`; see `mcpTools.declaredRead`.
       declaredRead: tool.declaredRead ?? false,
       version: tool.version?.replaceAll(NUL, "") ?? null,
@@ -735,6 +774,7 @@ export type StorableTool = {
   inputSchema: Record<string, unknown>;
   effect: "read" | "write" | null;
   destructive: boolean;
+  unclassified: boolean;
   declaredRead: boolean;
   version: string | null;
 };
@@ -914,6 +954,18 @@ export const DEPLOYMENT_ACTOR = "deployment";
 export const UNATTRIBUTED_ACTOR = "unattributed";
 
 /**
+ * What started a configuration row, read from the actor it names, to spread into the row.
+ *
+ * A row OpenBot writes for a change nobody made names OpenBot as its actor ({@link DEPLOYMENT_ACTOR},
+ * or `openbot:always-on` and the personal edition's `openbot:personal-defaults`), and is started by
+ * OpenBot. Any other actor is a person, which is what a row with no initiator says. Without this an
+ * upgrade that gave every Bot the goal tools put a row per tool on Activity saying a person did it.
+ */
+export function initiatedBy(actor: string): { initiator?: AuditInitiator } {
+  return isOpenBotActor(actor) ? { initiator: DEPLOYMENT_INITIATOR } : {};
+}
+
+/**
  * Whose account this call went out as, for the trail.
  *
  * Reads the resolved descriptor rather than re-deriving from the entry's auth kind. That derivation
@@ -1081,7 +1133,16 @@ export const TOKEN_TIMEOUT_MS = 10_000;
  * show — a deliberate duplication of something that is not a secret, so that a screen listing what
  * the deployment holds does not have to decrypt anything to name it.
  */
-export type OAuthClient = { clientId: string; clientSecret: string };
+export type OAuthClient = {
+  clientId: string;
+  clientSecret: string;
+  /**
+   * How the client proves itself at the token endpoint, as the authorization server registered it.
+   * Only a server added by URL records one (`remote-oauth.ts`); the catalogue's vendors are reached
+   * the one way their entry was reviewed for.
+   */
+  authMethod?: string;
+};
 
 /**
  * Whether a value read back out of the vault is a client this deployment can actually present.
@@ -1231,6 +1292,9 @@ export type PluginStoreOptions = {
       token?: string;
       actorId?: string;
       botId?: string;
+      threadId?: string;
+      /** Which of the person's accounts the call runs in; see `VendorTransport.callTool`. */
+      accountId?: string;
     },
     toolName: string,
     args: Record<string, unknown>,

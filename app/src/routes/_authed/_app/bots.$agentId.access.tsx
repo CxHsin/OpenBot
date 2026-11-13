@@ -1,20 +1,16 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { AccessSections } from "@/components/bot-profile/access";
-import { BotSubpage } from "@/components/bot-profile/bot-subpage";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
+/**
+ * Skills and access (What it can do, in the personal edition) is split by kind: the Bot's Apps and
+ * Skills pages, its Approvals, and hand-offs on its Setup. An old link opens Apps, where most of
+ * what it showed went.
+ */
 export const Route = createFileRoute("/_authed/_app/bots/$agentId/access")({
-  component: AccessPage,
+  beforeLoad: ({ params }) => {
+    throw redirect({
+      to: "/bots/$agentId/apps",
+      params: { agentId: params.agentId },
+      replace: true,
+    });
+  },
 });
-
-function AccessPage() {
-  const { agentId } = Route.useParams();
-  return (
-    <BotSubpage
-      agentId={agentId}
-      description="Manage the skills, apps, and other Bots this Bot can use."
-      title="Skills and access"
-    >
-      {(agent) => <AccessSections agent={agent} />}
-    </BotSubpage>
-  );
-}

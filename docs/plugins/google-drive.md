@@ -11,6 +11,10 @@ Program; the REST API underneath has been generally available since 2015, so thi
 "no dependency on a preview", which for a connector people rely on is the better side of the trade.
 The tool names match Google's MCP server exactly, so a later swap back to it would keep every grant.
 
+This built-in connector is in the team edition only. OpenBot Personal doesn't list it on
+Connections: it reaches Google Drive through Composio's directory instead, so the same app isn't listed twice.
+An install that already added this connector keeps it listed and working.
+
 Setting it up takes two people, and neither can do the other's half:
 
 | Who               | Does                                                    | Where                                    |
@@ -39,7 +43,7 @@ credential is otherwise good is most often this API not being enabled on the pro
 
 ### 3. Create an OAuth client
 
-Type **Web application**. Under **Authorised redirect URIs**, add this deployment's callback:
+Type **Web application**. Under **Authorized redirect URIs**, add this deployment's callback:
 
 ```
 <OPENBOT_PUBLIC_URL>/api/plugins/oauth/callback
@@ -66,7 +70,9 @@ At `/admin/plugins/google-drive`:
 
 That completes setup. No personal account is needed to get this far — the tool list for this
 connector is OpenBot's own code rather than an answer from a remote server, so there is nothing to
-authenticate in order to read it.
+authenticate in order to read it. For the same reason, after an upgrade the server brings the
+recorded tools up to date with the new release when it starts; nobody has to press Refresh again.
+Which Bots hold them is left as it was.
 
 To check it actually works, use **Your account** on the same page: it connects *your* Google account
 and returns you here. That is a personal grant like anybody else's, reaching your documents only, and
@@ -153,11 +159,12 @@ failure carrying its own reason; the second is a request that ran past the conne
 are worth retrying, and a persistent one is about the path between this deployment and Google rather
 than about the account.
 
-### "You have not connected your Google Drive account."
+### "You have not connected your Google Drive account. Connect it and ask again."
 
 The Bot was asked to read as somebody with no connection stored. Connect at
-`/connections/google-drive`. There is no fallback to a deployment-wide credential —
-by design, since a fallback would answer with somebody else's access.
+`/connections/google-drive`, or with **Connect** on the card the conversation shows. There is no
+fallback to a deployment-wide credential, by design, since a fallback would answer with somebody
+else's access.
 
 ### The connection worked and stopped about an hour later
 

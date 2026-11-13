@@ -21,6 +21,7 @@ import {
   skillSharingAllowed,
   skillSharingInSnapshot,
 } from "./admin/controls";
+import { fixSettings } from "./admin/settings-store";
 import {
   CoworkerUnavailableError,
   createActorAgentResolver,
@@ -32,6 +33,7 @@ import {
   readRunAssertion,
 } from "./agents/callback-token";
 import { canUseComputer } from "./agents/computer-access";
+import { isUnattended, runModeOf } from "./agents/run-mode";
 import { wireCoordination } from "./agents/coordination-wiring";
 import { createAgentFetch } from "./agents/endpoint";
 import { createHandoffDesk } from "./agents/handoff";
@@ -47,6 +49,7 @@ import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
 import { createRuntimeAgentLoader } from "./agents/runtime-agents";
 import { createSubagents, SUBAGENT_HANDED_BACK } from "./agents/subagent";
+import { toolLimitRecorder } from "./agents/tool-limit";
 import { serverTurnAdmission } from "./agents/turn-admission";
 import {
   createWakeUpRunner,
@@ -54,18 +57,22 @@ import {
   wakeUpTools,
 } from "./agents/wake-up";
 import { createApp } from "./app";
+import { createDecisionWaits } from "./approvals/decision-waits";
 import { createApprovedActionExecutor } from "./approvals/execute";
 import { createPersonResponseTick } from "./approvals/person-response-sweep";
 import {
   type PersonQuestion,
   questionConversationBot,
 } from "./approvals/questions";
+import { waitForReplyInTranscript } from "./approvals/reply-in-transcript";
 import { createApprovalResumeTick } from "./approvals/resume-sweep";
+import { loadRuleVocabulary } from "./approvals/rule-vocabulary";
 import { createApprovalStore } from "./approvals/store";
 import { ApprovalRefusedError } from "./approvals/types";
 import { createServerApprovalService } from "./approvals/wiring";
 import {
   type AuditInitiator,
+  addAuditTap,
   auditSink,
   createAuditReader,
   createAuditStore,
@@ -73,6 +80,7 @@ import {
   PERSON_INITIATOR,
   recordAuditEvent,
 } from "./audit";
+import { readAuditVocabulary } from "./audit-ask";
 import { startRetentionSweeps } from "./audit-retention";
 import { createAuth, sessionLifetimeMs } from "./auth";
 import { DEV_ACTOR, initializeDevActorUser } from "./auth/dev-actor";
@@ -92,6 +100,7 @@ import {
   personBrowserPlace,
   withPersonBrowsers,
 } from "./browser/host";
+import { personBrowserId, personBrowserInstallId } from "./browser/person";
 import {
   loadAttachmentForTurn,
   markAttachmentsSent,
@@ -105,6 +114,7 @@ import {
   createGroupStore,
   groupSourceForRun,
 } from "./channels/group";
+import { createModelChoices } from "./channels/model-choice";
 import { type ChannelStore, createChannelStore } from "./channels/routes";
 import { createStallGuard } from "./channels/stall-guard";
 import {
@@ -158,17 +168,17 @@ import {
   channelMemberships,
   channels,
   intelligenceChannelMappings,
+  recorderConnections,
   users,
 } from "./db/schema";
 import { createDeliveryRouter, DELIVERY_WORK_KINDS } from "./delivery/router";
-import {
-  configuredDeliveryProviders,
-  type DeliveryScopeResolver,
-} from "./delivery/routes";
+import { configuredDeliveryProviders } from "./delivery/routes";
+import { createDeliveryScopes } from "./delivery/scope";
 import { createDeliveryStore } from "./delivery/store";
 import { createTelegramIngress } from "./delivery/telegram-ingress";
 import type { DeliveryScope } from "./delivery/types";
 import { DeliveryRefusedError } from "./delivery/types";
+import { currentEdition, editionHasMemory, setEdition } from "./edition";
 import {
   createHostAccessBroker,
   HostAccessRefusedError,
@@ -184,6 +194,8 @@ import {
   observeIntelligenceAuthentication,
 } from "./intelligence-client";
 import { reportIntelligenceEntitlement } from "./intelligence-entitlement-check";
+import { createSkillApprovalStore } from "./learning/approvals";
+import { createAutoApprover } from "./learning/auto-approve";
 import {
   createLearningAutoAssign,
   probeLearningContainer,
@@ -198,12 +210,23 @@ import {
   type LearningContainerCredentials,
   learningSetupInstructions,
 } from "./learning/ensure-container";
+import { createInspectorLearningReader } from "./learning/inspector";
+import {
+  createLearningModelCalls,
+  learningModelEndpointFor,
+} from "./learning/model-endpoint";
+import { learningModelUnavailable } from "./learning/routes";
+import { createLearningPeople } from "./learning/people";
 import {
   createPersonalLearningSpaces,
   createPersonSpaceStore,
 } from "./learning/personal-space";
 import { clearLearningRevisionFallback } from "./learning/runtime";
-import { createLearningSettingsStore } from "./learning/settings";
+import { learningScopes } from "./learning/scopes";
+import {
+  configuredLearningContainer,
+  createLearningSettingsStore,
+} from "./learning/settings";
 import {
   createLearningSharingStore,
   createOpenSkillIndex,
@@ -212,9 +235,11 @@ import { configureModelMeasurement, measureTurns } from "./measurement/model";
 import { createMemoryDefaults } from "./memory/defaults";
 import { createMemoryIngestion } from "./memory/ingestion";
 import { createIntelligenceMemory } from "./memory/intelligence";
+import { createMemoryRuntime } from "./memory/runtime";
 import { createMemoryStore } from "./memory/store";
-import { memoryTools } from "./memory/tools";
+import { offeredMemoryTools } from "./memory/tools";
 import { reportModelAvailability } from "./model-availability-check";
+import { createModelCatalogue } from "./model-catalogue";
 import { createSignInNotifier, createSignInResumer } from "./passwords/resume";
 import { createSignInService } from "./passwords/service";
 import { createPasswordStore } from "./passwords/store";
@@ -233,10 +258,22 @@ import { createComposioClient } from "./plugins/composio-adapter";
 import { backfillBrokeredLogos } from "./plugins/logos";
 import { redirectUriFor } from "./plugins/oauth";
 import {
+  ensureAlwaysOnApp,
+  ensurePersonalLearning,
+  ensurePersonalSkills,
+  ensurePersonalSkillsOwned,
+  personalDefaultAppsMemory,
+  personalDefaultsDeps,
+  startPersonalDefaultApps,
+  withPersonalDefaults,
+} from "./plugins/personal-defaults";
+import {
   arcadeVerifierNotice,
+  ownsBrokerProject,
   selectProviderWiring,
   storedProvider,
 } from "./plugins/provider-wiring";
+import { startBrokeredRelist } from "./plugins/relist";
 import {
   createSharedUseGate,
   createSharedUseStore,
@@ -244,12 +281,14 @@ import {
 import { ensureSingleUserIdentity } from "./plugins/single-user-identity";
 import { createPluginStore } from "./plugins/store";
 import {
+  connectedSystems,
   grantedSkills,
   grantedTools,
   REFUSAL_MARKER,
   vendorAnswer,
 } from "./plugins/tools";
 import { createProactiveEngine } from "./proactive/engine";
+import { checkInOfferTools } from "./proactive/offer-tool";
 import {
   createPrivateShareCheck,
   PRIVATE_SHARE_TOOL_REF,
@@ -266,6 +305,11 @@ import { createRecorderExtension } from "./recorder/wiring";
 import { createRequestActor } from "./request-actor";
 import { createResponsibilityBindingStore } from "./responsibilities/bindings";
 import {
+  useGoalTools,
+  withoutGoalCopiesInGoalRun,
+  withRepeatingGoalsPinned,
+} from "./responsibilities/chat-tools";
+import {
   createEmailTriggerRoutes,
   createSnsVerifier,
   fetchText as fetchSnsText,
@@ -278,7 +322,7 @@ import {
   useSlackTriggerIngest,
 } from "./responsibilities/slack";
 import { createResponsibilityStore } from "./responsibilities/store";
-import { responsibilityTools } from "./responsibilities/tools";
+import { answerTurnTools } from "./responsibilities/tools";
 import { createTriggerIngressRoutes } from "./responsibilities/trigger-routes";
 import { useTriggerTools } from "./responsibilities/trigger-tools";
 import { createTriggerStore } from "./responsibilities/triggers";
@@ -287,16 +331,28 @@ import { createServerResponsibilityEngine } from "./responsibilities/wiring";
 import { createRoutineRunner } from "./routines/runner";
 import { createRoutineStore } from "./routines/store";
 import { createIntentRouter } from "./routing/classify";
-import { createModelCompleter } from "./routing/model";
+import {
+  createModelCompleter,
+  createSkillChooser,
+  routingModelFor,
+} from "./routing/model";
 import { createRoutineWork } from "./scheduling/routine-work";
 import { createTurnScheduling } from "./scheduling/turns";
 import { createSelfHostBanner } from "./self-host-banner";
+import { createSetupSources, modelKeyOf } from "./setup/checklist";
+import { createComputerCheck } from "./setup/computer-check";
 import { createTaskRunner } from "./tasks/runner";
 import { createTaskStore } from "./tasks/store";
 import { createTaskTurn } from "./tasks/turn";
 import { createTeamBots } from "./team-bots/team-bots";
+import { createProductTelemetry } from "./telemetry/product";
+import {
+  deliveryLineage,
+  productHeadlessBoundary,
+} from "./telemetry/product-boundaries";
 import {
   createPackageStatusReader,
+  deploymentNameOf,
   loadTenantPackage,
   synchronizeTenantPackage,
 } from "./tenant-package";
@@ -304,10 +360,16 @@ import { createUserInstructionsStore } from "./user-instructions";
 import { createUserPreferencesStore } from "./user-preferences";
 import { createVoiceSessionStore } from "./voice/sessions";
 import { createVoiceSummarizer } from "./voice/summary";
+import { readAuditEvent, readWhatIfVocabulary } from "./what-if";
 import { repeatAfterEach } from "./work/loop";
 import { createWorkQueue, type WorkOfferedListener } from "./work/queue";
 
 const config = loadConfig();
+// Before anything resolves a capability or reads an enterprise setting. See edition.ts.
+setEdition(config.edition);
+// One person on their own machine is shown every model their credential lists; nothing narrows it.
+if (config.singleUser)
+  fixSettings({ modelAllowlist: { enabled: false, models: [] } });
 // The environment seeds local policy once. The SDK fallback must not reapply an old revision
 // after an administrator clears a pin to follow the latest published Skills.
 clearLearningRevisionFallback();
@@ -315,44 +377,55 @@ clearLearningRevisionFallback();
 // `serverPort` in config.ts for what `process.env.PORT ?? …` did with `PORT=` instead.
 const port = config.port;
 const database = createDatabase(config.databaseUrl);
+const productTelemetry = await createProductTelemetry({
+  privacyKey: config.keyEncryptionKey,
+  deploymentId: config.deploymentId,
+});
+addAuditTap(productTelemetry.recordAudit);
+const prepareProductRunInput = productHeadlessBoundary(productTelemetry);
 const profileStore = createProfileStore(database);
 // Every dispatch point asks this database whether its person paused the Bot. See agents/lifecycle.ts.
 configureBotLifecycle({ database });
+// The environment's container, until the boot check finds this Intelligence has no such container
+// (learning/auto-assign.ts). A name left over from a setup against another Intelligence then gives
+// way to automatic assignment instead of failing every new thread.
+const configuredLearning = configuredLearningContainer(config.learning);
 const learningSettingsStore = createLearningSettingsStore(
   database,
-  config.learning,
+  configuredLearning,
 );
 // Its own client, like the self-host banner's: the constructor opens nothing.
 const learningProbeIntelligence = createIntelligenceClient(
   config.runtime.intelligence,
 );
 /*
- * Who can create the `openbot` container here: never the runtime key. A service token the operator
- * configured (local evaluation installs), or a CopilotKit CLI login on this machine, which is what a
- * laptop running `bun run start` has. Neither, and the log and Admin say exactly what to run instead.
+ * Who can create a Learning container here. First the runtime key itself, on an Intelligence that
+ * lets a project key create one in its own project, at the address the server already uses (a
+ * Service in the cluster with the bundled Intelligence). On one that does not, a service token the
+ * operator configured (local evaluation installs), or a CopilotKit CLI login on this machine, which
+ * is what a laptop running `bun run start` has: those two only over HTTPS, or HTTP on loopback.
+ * None of them, and the log and Admin say exactly what to run instead.
  */
+const learningApiUrl = config.runtime.intelligence.apiUrl.replace(/\/+$/, "");
 const learningApiOrigin = (() => {
   try {
-    return intelligenceApiOrigin(config.runtime.intelligence.apiUrl);
+    return intelligenceApiOrigin(learningApiUrl);
   } catch {
     return undefined;
   }
 })();
-const learningCanCreate =
-  learningApiOrigin !== undefined &&
-  (config.learningSetup !== undefined || cliLoginPresent());
-/** The credential that can create a Learning container, for the `openbot` default and for each person's own space. */
-const learningCredentials = (apiUrl: string): LearningContainerCredentials => ({
+/** The credentials that can create a Learning container, for the `openbot` default and for each person's own space. */
+const learningCredentials = (): LearningContainerCredentials => ({
   directory: process.cwd(),
-  apiUrl,
+  apiUrl: learningApiOrigin ?? learningApiUrl,
   nonInteractive: true,
   key: keyIntelligence(
-    apiUrl,
+    learningApiUrl,
     config.runtime.intelligence.apiKey,
     config.runtime.intelligence.gatewayWsUrl,
   ),
-  cliLogin: cliLoginPresent(),
-  ...(config.learningSetup
+  cliLogin: learningApiOrigin !== undefined && cliLoginPresent(),
+  ...(config.learningSetup && learningApiOrigin
     ? {
         serviceToken: {
           token: config.learningSetup.serviceToken,
@@ -363,18 +436,12 @@ const learningCredentials = (apiUrl: string): LearningContainerCredentials => ({
 });
 const learningAutoAssign = createLearningAutoAssign({
   enabled: config.learningAutoAssign,
+  configured: configuredLearning,
   store: learningSettingsStore,
   probe: (containerId) =>
     probeLearningContainer(learningProbeIntelligence, containerId),
-  ...(learningApiOrigin
-    ? { instructions: learningSetupInstructions(learningApiOrigin) }
-    : {}),
-  ...(learningCanCreate && learningApiOrigin
-    ? {
-        create: () =>
-          ensureLearningContainer(learningCredentials(learningApiOrigin)),
-      }
-    : {}),
+  instructions: learningSetupInstructions(learningApiOrigin ?? learningApiUrl),
+  create: () => ensureLearningContainer(learningCredentials()),
   audit: createAuditStore(database),
 });
 /*
@@ -386,15 +453,8 @@ const personalLearningSpaces = createPersonalLearningSpaces({
   readSettings: () => learningSettingsStore.read(),
   snapshots: learningProbeIntelligence,
   store: createPersonSpaceStore(database),
-  ...(learningCanCreate && learningApiOrigin
-    ? {
-        create: (container) =>
-          createLearningContainer({
-            ...learningCredentials(learningApiOrigin),
-            container,
-          }),
-      }
-    : {}),
+  create: (container) =>
+    createLearningContainer({ ...learningCredentials(), container }),
   nameFor: async (userId) =>
     (
       await database
@@ -404,6 +464,7 @@ const personalLearningSpaces = createPersonalLearningSpaces({
         .limit(1)
     ).map((row) => row.name?.trim() || null)[0] ?? null,
 });
+const skillApprovalStore = createSkillApprovalStore(database);
 const learningSharingStore = createLearningSharingStore(database);
 /** What everyone opened to every Bot, in memory: runs read this, never each person's space or the table. */
 const openSkillIndex = createOpenSkillIndex({
@@ -432,9 +493,11 @@ const agentProfileStore = createAgentProfileStore(
 // Read here rather than beside the synchronise below, because the package names the deployment and
 // the channel store needs that name before it can mint a thread id.
 const tenantPackage = await loadTenantPackage(config.tenantPackageDirectory);
-const threadIdentity = createThreadIdentity(
-  config.deploymentId ?? tenantPackage.tenantId,
-);
+// The package's id unless DEPLOYMENT_ID says otherwise, and the id the deployment was set up under if
+// the package has since been renamed. See `deploymentNameOf`.
+const deploymentId =
+  config.deploymentId ?? (await deploymentNameOf(database, tenantPackage));
+const threadIdentity = createThreadIdentity(deploymentId);
 const baseChannelStore = createChannelStore(
   database,
   agentProfileStore,
@@ -577,7 +640,7 @@ const { resolveRequestActor, identifyUser, identifyActor } = createRequestActor(
   },
 );
 // Where a person's own OpenBot browser may go: not where Bots may, but where their browser on their own laptop would
-// (browser/egress.ts). On OpenBot Desktop's host-side computer that is their own desktop, so everywhere.
+// (browser/egress.ts). On a host-side computer of people's browsers that is their own desktop, so everywhere.
 const personBrowserPolicy = personBrowserEgressPolicy({
   native: config.browser !== undefined,
   allowPrivateHosts: config.computer?.allowPrivateHosts ?? false,
@@ -592,6 +655,7 @@ const computerProvider = config.computer
       withPersonBrowsers(
         createComputerProvider(config.computer),
         config.browser?.url,
+        config.edition,
       ),
       {
         policyForBot: (botId) =>
@@ -604,8 +668,10 @@ const computerProvider = config.computer
     )
   : undefined;
 
-/** Why Record is refused in a Bot's browser here, or undefined where each Bot has a computer of its own. */
-const recordRefused = botRecordRefusal(computerProvider) ?? undefined;
+/** Why Record is refused in a Bot's browser here, or undefined where each Bot has a computer of its own, or the one
+ * computer is the one person's (the personal edition). */
+const recordRefused =
+  botRecordRefusal(computerProvider, config.edition) ?? undefined;
 
 if (computerProvider?.warm) {
   void computerProvider.warm();
@@ -756,6 +822,15 @@ const storedApprovals = createApprovalStore(database);
 // Before anything reads the model environment: blank base URLs removed, Anthropic given its `/v1`.
 normalizeModelBaseUrls();
 const runtimeModel = runtimeModelForEnvironment(tenantPackage.model);
+/**
+ * Where local Intelligence's Learning thinks on the person's plan, with a record of what became of
+ * each call so Settings can say why a run failed. Absent off a plan or without Desktop's secret.
+ */
+const learningModelEndpoint = learningModelEndpointFor(
+  runtimeModel.plan,
+  process.env.OPENBOT_LEARNING_MODEL_TOKEN,
+  createLearningModelCalls(),
+);
 // And before any Bot's model is resolved: behind a gateway, the API that model takes tools on (chooseOpenAIApi).
 if (chooseOpenAIApi(runtimeModel) === "responses")
   console.info(
@@ -767,22 +842,68 @@ if (chooseOpenAIApi(runtimeModel) === "responses")
     }),
   );
 
+/** The deployment's own model key, resolved on every call so a rotated one is used by the next. */
+const resolveDeploymentModelKey = () =>
+  resolveModelApiKey({
+    encryptionKey: config.keyEncryptionKey,
+    reader: credentialStore,
+    provider: runtimeModel.provider,
+    keyId: tenantPackage.model.credentialSecretRef,
+    environment: process.env,
+  });
+
 /**
- * Pass one of tool selection: which skills a message needs, on the deployment's own model.
- *
- * Built once rather than per request, because it holds nothing about a person: the key is resolved
- * on every call, so a credential rotated a moment ago is used by the next run.
+ * Pass one of tool selection, on the model the built-in Bots run on: their key, or their plan's
+ * harness. See `createSkillChooser`. Built once rather than per request, because it holds nothing
+ * about a person.
  */
-const chooseSkills = createModelCompleter({
+const chooseSkills = createSkillChooser(
+  runtimeModel,
+  resolveDeploymentModelKey,
+);
+
+/**
+ * The approval reviewer's model: the deployment's own, with its key or on its plan's harness (see
+ * `createModelCompleter`). On a plan it threw on every call and failed closed, so Auto-review asked
+ * the person about everything. It still fails closed on an error or a timeout (`reviewAction`).
+ */
+const reviewActions = createModelCompleter({
   model: runtimeModel,
-  resolveApiKey: () =>
-    resolveModelApiKey({
-      encryptionKey: config.keyEncryptionKey,
-      reader: credentialStore,
-      provider: runtimeModel.provider,
-      keyId: tenantPackage.model.credentialSecretRef,
-      environment: process.env,
-    }),
+  resolveApiKey: resolveDeploymentModelKey,
+});
+
+/**
+ * Writes a boundary from an admin's description, and reads it back (computer/policy-translate.ts).
+ * The deployment's own model, with longer to answer than the router: an admin pressed a button and
+ * is waiting for a rule, which is a longer answer than a router's one name, and a reasoning model
+ * spends seconds before it starts.
+ */
+const writeBoundaries = createModelCompleter({
+  model: runtimeModel,
+  resolveApiKey: resolveDeploymentModelKey,
+  timeoutMs: 45_000,
+  // Room for the thinking a current Claude model does before it answers, which counts against it.
+  maxTokens: 16_000,
+});
+
+/**
+ * Reads an admin's question about the audit trail as filters, and reads the filters back
+ * (audit-ask.ts). The deployment's own model, given as long as a boundary's writer for the same
+ * reason: an admin pressed Ask and is waiting.
+ */
+const askTheAuditTrail = createModelCompleter({
+  model: runtimeModel,
+  resolveApiKey: resolveDeploymentModelKey,
+  timeoutMs: 45_000,
+  maxTokens: 16_000,
+});
+
+/** Reads "what would happen if…" as one action (what-if.ts), for an admin who pressed Ask. */
+const readWhatIfQuestions = createModelCompleter({
+  model: runtimeModel,
+  resolveApiKey: resolveDeploymentModelKey,
+  timeoutMs: 45_000,
+  maxTokens: 16_000,
 });
 
 /*
@@ -838,7 +959,7 @@ const approvalService = createServerApprovalService({
   authoriseQuestion,
   routineIntelligence,
   approvalComputerTools,
-  review: (prompt, signal) => chooseSkills(prompt, signal),
+  review: (prompt, signal) => reviewActions(prompt, signal),
   // Assigned further down, once delivery is wired.
   notify: (scope, input) => deliveryNotifications(scope, input),
 });
@@ -879,6 +1000,27 @@ const computerGateway = computerProvider
               .where(inArray(users.id, ids))
           ).map((row) => [row.id, { name: row.name, email: row.email }]),
         ),
+      // Whose OpenBot browser each one is: the server minted its Recorder connection under the browser's own install id.
+      browserOwners: async (computerIds) => {
+        const rows = await database
+          .selectDistinct({ userId: recorderConnections.userId })
+          .from(recorderConnections)
+          .where(
+            and(
+              eq(recorderConnections.via, "openbot-browser"),
+              inArray(
+                recorderConnections.installId,
+                computerIds.map(personBrowserInstallId),
+              ),
+            ),
+          );
+        const wanted = new Set(computerIds);
+        return new Map(
+          rows
+            .map((row) => [personBrowserId(row.userId), row.userId] as const)
+            .filter(([computerId]) => wanted.has(computerId)),
+        );
+      },
       auditStore: bootAuditStore,
       approvalGate: approvalService.gate,
       policy: () => policyStore.get(),
@@ -951,11 +1093,16 @@ if (wiredProvider) {
   assertActivatable(wiredProvider, otherProviderRows);
 }
 /*
- * Arcade's verifier is set by hand in Arcade's dashboard and cannot be read back, so an Arcade
- * deployment says once, at startup, which address it must be set to. See `arcadeVerifierNotice`.
+ * Arcade's client checks its project's user verifier names this deployment before every consent it
+ * mints, and a single-user install, which owns its project, points it here when it does not. A
+ * deployment that signs people in only checks, and one that does not know its origin can do
+ * neither; both say so once, at startup. See `arcadeVerifierNotice`.
  */
 if (wiredProvider === "arcade") {
-  console.warn(arcadeVerifierNotice(config.publicUrl));
+  const notice = arcadeVerifierNotice(config.publicUrl, {
+    ownsProject: ownsBrokerProject(config),
+  });
+  if (notice) console.warn(notice);
 }
 
 /**
@@ -1066,39 +1213,46 @@ await ensureSingleUserIdentity(database, {
   provider: composio?.provider ?? null,
 });
 
-const pluginStore = createPluginStore({
-  database,
-  deploymentId: config.deploymentId ?? tenantPackage.tenantId,
-  auditStore: bootAuditStore,
-  credentials: credentialStore,
-  encryptionKey: config.keyEncryptionKey,
-  policy: () => policyStore.get(),
-  approvalGate: approvalService.gate,
-  sharedUse: createSharedUseGate(sharedUseStore, bootAuditStore),
-  // A connector send to other people asks the owner first. See plugins/share-target.ts.
-  privateShareCheck: createPrivateShareCheck({
-    approvals: approvalService.store,
+// In the personal edition, every tool an app lists goes to every Bot; in every edition, Routines
+// is given to every Bot. See personal-defaults.ts.
+const pluginStore = withPersonalDefaults(
+  createPluginStore({
+    database,
+    deploymentId,
+    auditStore: bootAuditStore,
+    credentials: credentialStore,
+    encryptionKey: config.keyEncryptionKey,
+    policy: () => policyStore.get(),
+    approvalGate: approvalService.gate,
+    sharedUse: createSharedUseGate(sharedUseStore, bootAuditStore),
+    // A connector send to other people asks the owner first. See plugins/share-target.ts.
+    privateShareCheck: createPrivateShareCheck({
+      approvals: approvalService.store,
+    }),
+    /*
+     * Where a vendor sends people back, for a vendor whose client this deployment registers itself.
+     *
+     * The same value the connect and callback routes build, from the same config field, because it has
+     * to match what was registered character for character. Undefined without a public URL, which is
+     * the honest state: there is nowhere for a consent flow to come back to, so there is nothing worth
+     * registering.
+     */
+    redirectUri: config.publicUrl
+      ? redirectUriFor(config.publicUrl)
+      : undefined,
+    /*
+     * The same client the transport seam above was installed with, never a second one. Enabling an
+     * app writes the row here and creates the auth config at the vendor, and a store holding a
+     * different client from the one the call goes out through is two deployments' worth of state
+     * behind one screen. Undefined without a key, which leaves enabling an app refused rather than
+     * attempted.
+     */
+    broker: composio?.broker,
+    brokerProvider,
+    ...(entra ? { entra } : {}),
   }),
-  /*
-   * Where a vendor sends people back, for a vendor whose client this deployment registers itself.
-   *
-   * The same value the connect and callback routes build, from the same config field, because it has
-   * to match what was registered character for character. Undefined without a public URL, which is
-   * the honest state: there is nowhere for a consent flow to come back to, so there is nothing worth
-   * registering.
-   */
-  redirectUri: config.publicUrl ? redirectUriFor(config.publicUrl) : undefined,
-  /*
-   * The same client the transport seam above was installed with, never a second one. Enabling an
-   * app writes the row here and creates the auth config at the vendor, and a store holding a
-   * different client from the one the call goes out through is two deployments' worth of state
-   * behind one screen. Undefined without a key, which leaves enabling an app refused rather than
-   * attempted.
-   */
-  broker: composio?.broker,
-  brokerProvider,
-  ...(entra ? { entra } : {}),
-});
+  personalDefaultsDeps(database),
+);
 
 /*
  * Personal ⇄ Shared for a brokered app. Built here because it needs the plugin store, the shared-use
@@ -1109,7 +1263,7 @@ const accountModes = createAccountModeSwitch({
   store: pluginStore,
   sharedUse: sharedUseStore,
   teamRules: approvalService.store.policy,
-  deploymentId: config.deploymentId ?? tenantPackage.tenantId,
+  deploymentId,
   audit: bootAuditStore,
 });
 
@@ -1138,6 +1292,60 @@ if (composio) {
  */
 const routineStore = createRoutineStore(database);
 useRoutineTools(routineStore);
+// Routines is on from the start in every edition, for every Bot. See personal-defaults.ts.
+await ensureAlwaysOnApp(pluginStore, personalDefaultsDeps(database));
+/*
+ * The personal edition gives each Bot every skill once, so the skills there are reach every Bot and
+ * one switched off for a Bot stays off. A failure is a warning: a Bot is given them again the first
+ * time it is listed or runs. Does nothing in the team edition.
+ */
+await ensurePersonalSkills(pluginStore, personalDefaultsDeps(database)).catch(
+  (error: unknown) => {
+    console.warn(
+      `Couldn't give every Bot its skills at startup; each Bot gets them the first time it runs. ${error instanceof Error ? error.message : String(error)}`,
+    );
+  },
+);
+/*
+ * The personal edition's skills the person wrote on Settings > Skills before the route gave them an
+ * owner become theirs, so a Bot's "Your skills" lists them. A failure is a warning, and the next
+ * start tries again. Does nothing in the team edition.
+ */
+await ensurePersonalSkillsOwned(database, DEV_ACTOR, bootAuditStore).catch(
+  (error: unknown) => {
+    console.warn(
+      `Couldn't mark the skills you wrote as yours at startup; the next start tries again. ${error instanceof Error ? error.message : String(error)}`,
+    );
+  },
+);
+/*
+ * Every Bot in the personal edition takes part in Automatic Learning. A failure is a warning: each
+ * Bot is checked again the first time it is listed or runs. Does nothing in the team edition.
+ */
+await ensurePersonalLearning(
+  personalDefaultsDeps(database),
+  bootAuditStore,
+).catch((error: unknown) => {
+  console.warn(
+    `Couldn't make sure every Bot takes part in Learning at startup; each Bot is checked again the first time it runs. ${error instanceof Error ? error.message : String(error)}`,
+  );
+});
+/*
+ * The personal edition turns Parallel's keyless web search on once, on its first start. Not awaited:
+ * adding it asks search.parallel.ai for its tools, and an offline start must still start. It keeps
+ * retrying until the tools arrive. Does nothing in the team edition.
+ */
+startPersonalDefaultApps(
+  pluginStore,
+  personalDefaultsDeps(database),
+  personalDefaultAppsMemory(database),
+);
+/*
+ * An app of the broker listed by an older build is listed again once, so an upgraded install records
+ * its actions as a fresh one would (see `relistOutdatedBrokeredApps`). Not awaited, for the reason
+ * above, and it keeps trying until every app is listed.
+ */
+startBrokeredRelist(pluginStore);
 const responsibilityStore = createResponsibilityStore(database, {
   resolveTarget: async (ownerUserId, agentId, channelId) => {
     const actor = await actorFor(ownerUserId);
@@ -1218,6 +1426,14 @@ useTriggerTools({
   publicUrl: config.publicUrl ?? null,
   emailDomain: inboundEmail?.domain ?? null,
 });
+// And goals, through the same transport: asked for a goal, a Bot makes one. See chat-tools.ts.
+useGoalTools({
+  store: responsibilityStore,
+  // Read when a goal is run, long after the engine further down is made.
+  engine: { ingest: (event) => responsibilityEngine.ingest(event) },
+  conversationFor: routineStore.conversationFor,
+  linkRoutine: routineStore.linkGoal,
+});
 
 /**
  * Where a Bot handing work to another gets decided.
@@ -1240,6 +1456,8 @@ const handoffDesk = createHandoffDesk({
         // would let a Bot address one nobody gave it because the database blinked.
         .catch(() => [] as string[])
     ).includes(toBotId),
+  // The same grants, listed, so a name that matches no Bot is answered with the ones it may ask.
+  addressable: (fromBotId) => pluginStore.botsReachableFrom(fromBotId),
   /*
    * Deferred rather than passed directly, because `actorFor` is defined further down with the rest
    * of the run-building collaborators. It is only ever called during a hop, long after this module
@@ -1345,6 +1563,21 @@ const stallGuard = createStallGuard({
 const intentRouter = createIntentRouter({
   complete: createModelCompleter({
     model: runtimeModel,
+    /*
+     * Picking a Bot sits between send and the conversation opening; see `routingModelFor`. Never a
+     * model the admin's allowlist leaves out: the router then stays on the deployment's own model,
+     * which the allowlist already governs for every run.
+     */
+    fastModel: () => {
+      const fast = routingModelFor(runtimeModel, process.env);
+      const allowlist =
+        enterpriseControls()?.snapshot()?.settings.modelAllowlist;
+      return fast &&
+        (!allowlist?.enabled ||
+          allowlist.models.includes(`${runtimeModel.provider}/${fast}`))
+        ? fast
+        : undefined;
+    },
     resolveApiKey: () =>
       resolveModelApiKey({
         encryptionKey: config.keyEncryptionKey,
@@ -1358,18 +1591,32 @@ const intentRouter = createIntentRouter({
 
 // Said once at boot: whether the key can call the model the Bots run on. A key without access to it
 // otherwise passes every start-up check and fails at the first message, in front of whoever sent it.
-void reportModelAvailability({
-  provider: runtimeModel.provider,
-  model: runtimeModel.defaultModel,
-  apiKey: () =>
-    resolveModelApiKey({
-      encryptionKey: config.keyEncryptionKey,
-      reader: credentialStore,
-      provider: runtimeModel.provider,
-      keyId: tenantPackage.model.credentialSecretRef,
-      environment: process.env,
-    }),
-});
+// Kept, with a stamp naming the key it asked about, so the setup checklist can repeat the answer
+// for that key and say "not checked yet" for any other. The checklist's "Check again" asks again
+// through the same function. Never rejects: a failed read reads as not checked.
+const checkModelAvailability = () =>
+  reportModelAvailability({
+    provider: runtimeModel.provider,
+    model: runtimeModel.defaultModel,
+    apiKey: () =>
+      resolveModelApiKey({
+        encryptionKey: config.keyEncryptionKey,
+        reader: credentialStore,
+        provider: runtimeModel.provider,
+        keyId: tenantPackage.model.credentialSecretRef,
+        environment: process.env,
+      }),
+  });
+const modelCheckAtBoot = (async () => {
+  const { stamp } = await modelKeyOf({
+    plan: Boolean(runtimeModel.plan),
+    provider: runtimeModel.provider,
+    keyId: tenantPackage.model.credentialSecretRef,
+    credentials: credentialStore,
+    environment: process.env,
+  });
+  return { outcome: await checkModelAvailability(), stamp };
+})().catch(() => undefined);
 
 // Named collaborators are bound once in actorAgentResolver for chat, hops, and headless turns.
 
@@ -1382,6 +1629,32 @@ const resolveRuntimeModelApiKey = () =>
     keyId: tenantPackage.model.credentialSecretRef,
     environment: process.env,
   });
+
+/**
+ * The models a person may pick for a Bot's run, and how hard each can think, asked of whatever
+ * serves the model: the provider, the gateway in OPENAI_BASE_URL, or a signed-in plan's own listing.
+ * One person on their own machine picks from all of them; in a team, people pick among the models an
+ * admin allowed (Admin, Providers), and get the default until there are any. Read now and then every
+ * few hours in the background, and early when a provider refuses a model; never per message.
+ */
+const modelCatalogue = createModelCatalogue({
+  model: runtimeModel,
+  apiKey: resolveRuntimeModelApiKey,
+  ...(config.singleUser
+    ? {}
+    : {
+        allowlist: () =>
+          enterpriseControls()?.snapshot()?.settings.modelAllowlist,
+      }),
+});
+modelCatalogue.start();
+
+/** Each person's pick per conversation, saved through `/api/channels/:id/model` and read per run. */
+const modelChoices = createModelChoices({
+  database,
+  model: runtimeModel,
+  catalogue: modelCatalogue,
+});
 
 const hostAccessBroker = createHostAccessBroker(Date.now, {
   approvalGate: approvalService.gate,
@@ -1431,6 +1704,46 @@ const recorderExpirySweep = repeatAfterEach(async () => {
     );
   }
 }, 60_000);
+/*
+ * The personal edition has one reviewer, who is DEV_ACTOR (it requires single-user mode, which admits every request as
+ * DEV_ACTOR), so what its Bots learn is approved for them while automatic approval is on: once shortly after boot, so
+ * what waited while the app was closed doesn't wait another 15 minutes, then every 15 minutes.
+ */
+const autoApprover = createAutoApprover({
+  manage: learningProbeIntelligence.experimental.learning,
+  enabled: async () =>
+    currentEdition() === "personal" &&
+    ((await learningSettings.read()).autoApprove ?? true),
+  sources: async () =>
+    learningScopes({
+      edition: "personal",
+      userId: DEV_ACTOR.id,
+      settings: await learningSettings.read(),
+    }),
+  approvals: skillApprovalStore,
+  userId: DEV_ACTOR.id,
+  audit: bootAuditStore,
+});
+const sweepAutoApprovals = () =>
+  void autoApprover.sweep().catch((error) =>
+    console.error(
+      JSON.stringify({
+        type: "learning-auto-approve-sweep-error",
+        error: error instanceof Error ? error.name : "UnknownError",
+        timestamp: new Date().toISOString(),
+      }),
+    ),
+  );
+const firstAutoApproveSweep =
+  currentEdition() === "personal"
+    ? setTimeout(sweepAutoApprovals, 10_000)
+    : undefined;
+firstAutoApproveSweep?.unref();
+const autoApproveTimer =
+  currentEdition() === "personal"
+    ? setInterval(sweepAutoApprovals, 15 * 60_000)
+    : undefined;
+autoApproveTimer?.unref();
 const memoryIngestion = createMemoryIngestion({
   store: personalMemoryStore,
   plugins: pluginStore,
@@ -1461,22 +1774,18 @@ const checkInScope = createCheckInScope({
   unaskedOwnAccount: (ownerUserId, agentId) =>
     teamBots.unaskedOwnAccount(ownerUserId, agentId),
 });
-const deliveryScopeFor: DeliveryScopeResolver = async (
-  ownerUserId,
-  channelId,
-  agentId,
-) => {
-  const person = await peopleStore.find(ownerUserId);
-  if (!person || person.revoked) return null;
-  const actor = await actorFor(ownerUserId);
-  const [channel, bot] = await Promise.all([
-    channelStore.get(actor, channelId),
-    agentProfileStore.get(actor, agentId),
-  ]);
-  return channel?.active && bot && channel.agentIds.includes(agentId)
-    ? { ownerUserId, channelId, agentId, threadId: channel.threadId }
-    : null;
-};
+/*
+ * The person's conversation with a Bot, as delivery addresses it, and whether a scope still names one
+ * they can reach: the channel's own thread, or that Bot's own thread in a group. See delivery/scope.ts.
+ */
+const { scopeFor: deliveryScopeFor, authorise: authoriseDeliveryScope } =
+  createDeliveryScopes({
+    database,
+    people: peopleStore,
+    actorFor,
+    channels: channelStore,
+    bots: agentProfileStore,
+  });
 
 /*
  * Memory sources and background research, on by default for each person and Bot, and never switched
@@ -1487,6 +1796,7 @@ const memoryDefaults = createMemoryDefaults({
   ingestion: memoryIngestion,
   sources: config.memoryDefaults.sources,
   research: config.memoryDefaults.research,
+  edition: config.edition,
   channelBots: async (ownerUserId, channelId) =>
     (await channelStore.get(await actorFor(ownerUserId), channelId))
       ?.agentIds ?? null,
@@ -1499,39 +1809,14 @@ const memoryDefaults = createMemoryDefaults({
     teamBots.publishedByAnother(ownerUserId, agentId),
 });
 personSpoke = memoryDefaults.personSpoke;
-const loadPersonalMemoryForActor = (ownerUserId: string) => (botId: string) => {
-  // Apps connected since this Bot's last turn become its memory sources. Never waits.
-  memoryDefaults.botTurn(ownerUserId, botId);
-  return memoryIngestion.contextFor(ownerUserId, botId);
-};
-const memorySweep = repeatAfterEach(async () => {
-  try {
-    await memoryIngestion.syncDue();
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        type: "memory-sweep-error",
-        error: error instanceof Error ? error.name : "UnknownError",
-        context: { operation: "syncDue" },
-        timestamp: new Date().toISOString(),
-      }),
-    );
-  }
-  // Mirror to Intelligence what is out of step: the backfill on the first passes after a deployment
-  // becomes entitled, and afterwards whatever an outage left behind. A no-op without Intelligence.
-  try {
-    await personalMemoryStore.mirrorPending();
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        type: "memory-sweep-error",
-        error: error instanceof Error ? error.name : "UnknownError",
-        context: { operation: "mirrorPending" },
-        timestamp: new Date().toISOString(),
-      }),
-    );
-  }
-}, 60_000);
+// Nothing of it in the personal edition: no memory in a turn, no sync. See memory/runtime.ts.
+const memoryRuntime = createMemoryRuntime({
+  edition: config.edition,
+  defaults: memoryDefaults,
+  ingestion: memoryIngestion,
+  store: personalMemoryStore,
+});
+const memorySweep = repeatAfterEach(memoryRuntime.sweep, 60_000);
 // Follow-ups a Bot schedules for itself, on the shared work queue. See agents/wake-up.ts.
 const wakeUpStore = createWakeUpStore(database, { auditStore: bootAuditStore });
 
@@ -1544,7 +1829,7 @@ const loadToolsForActor =
       agentId: botId,
       initiator,
     }),
-    ...memoryTools({
+    ...offeredMemoryTools(config.edition, {
       store: personalMemoryStore,
       ingestion: memoryIngestion,
       ownerUserId: actorId,
@@ -1561,6 +1846,17 @@ const loadToolsForActor =
       composioConfigured: Boolean(composio),
       ...(composio ? { directory: () => composio.broker.listApps() } : {}),
       sharedAudience: sharedUseStore.admitsPerson,
+    }),
+    /*
+     * Held by every Bot: offering a check-in on what the person just looked at, which the card turns
+     * on only if they accept. A read; see the file. The engine is made further down, and a tool is
+     * only ever built for a run, long after.
+     */
+    ...checkInOfferTools({
+      ownerUserId: actorId,
+      agentId: botId,
+      allowed: (owner) => proactiveEngine.allowed(owner),
+      list: (owner) => proactiveStore.list(owner),
     }),
     ...(await grantedTools({
       store: pluginStore,
@@ -1702,11 +1998,14 @@ const signRunForActor =
  * Google's sign-in page and asked a person to sign in to an account the deployment had already
  * connected. Naming them lets it say which one it has not been granted instead.
  *
+ * Only the ones whose tools were listed: an app whose sign-in never finished is not connected, and
+ * was being named to every Bot as one an administrator could grant. See `connectedSystems`.
+ *
  * Read per request rather than held, because a connector added a minute ago has to count.
  * Let failures reach buildAgents, which reports the missing guidance once and keeps the run usable.
  */
 const loadVendors = async () =>
-  (await pluginStore.listServers()).map((server) => server.id);
+  connectedSystems(await pluginStore.listServers());
 
 /*
  * How a run's tools are narrowed to the ones it is about.
@@ -1740,6 +2039,8 @@ const selectionForActor = (actorId: string): ToolSelection => ({
         granted: selection.granted,
         offered: selection.offered.length,
         skills: selection.skills,
+        // Set when the offer was cut to what one request may carry. See `fitToolLimit`.
+        ...(selection.limit === undefined ? {} : { limit: selection.limit }),
       },
     });
   },
@@ -1759,6 +2060,10 @@ const agentFetch = createAgentFetch({
     config.managedAgent?.endpoint,
     config.managedAgent?.alsoRun,
   ].filter((url): url is URL => url !== undefined),
+  // An agent the person runs on their own loopback, reached from this server's container.
+  ...(config.thisMachineHost
+    ? { thisMachineHost: config.thisMachineHost }
+    : {}),
   // The refusal is what the run already knows; this is what the deployment knows. Written here
   // rather than in `endpoint.ts` so that file keeps deciding and nothing else, the way the
   // target check it reuses does.
@@ -1869,6 +2174,8 @@ const routineRunner = createRoutineRunner({
     ),
   runTurn: measureTurns(
     createTurnRunner({
+      prepareRunInput: prepareProductRunInput,
+      onKnownStop: productTelemetry.stopKnown,
       admission: serverTurnAdmission,
       intelligence: routineIntelligence,
       runner: routineAgentRunner,
@@ -1913,6 +2220,8 @@ const routineResumeSweep = repeatAfterEach(async () => {
  */
 const subagents = createSubagents({
   turn: {
+    prepareRunInput: prepareProductRunInput,
+    onKnownStop: productTelemetry.stopKnown,
     admission: serverTurnAdmission,
     intelligence: routineIntelligence,
     runner: routineAgentRunner,
@@ -1945,17 +2254,43 @@ const subagents = createSubagents({
  * is talking to.
  */
 const actorAgentResolver = createActorAgentResolver({
+  productTelemetry,
   loadAgents: loadAgentsForActor,
   model: runtimeModel,
   resolveModelApiKey: resolveRuntimeModelApiKey,
+  pickedModelForActor: (actorId, initiator) => (input) =>
+    modelChoices.forRun(actorId, input.threadId, {
+      unattended: isUnattended(runModeOf(initiator)),
+    }),
   stallGuard,
   loadToolsForActor: (actorId, initiator) =>
     restrictToolsForRun(
       initiator,
       actorId,
-      loadToolsForActor(actorId, initiator),
+      // A turn the person did not send reads the goals that repeat as it begins.
+      withRepeatingGoalsPinned(
+        initiator,
+        actorId,
+        // A goal's run holds the goal's own tools; the Routines copies would be a second set.
+        withoutGoalCopiesInGoalRun(
+          initiator,
+          loadToolsForActor(actorId, initiator),
+        ),
+      ),
       checkInScope,
     ),
+  /*
+   * Which apps each Bot can use for this person, by name and connection state, so a Bot holding
+   * Gmail the person connected says so from its first message instead of finding out by searching.
+   */
+  loadAppsForActor: (actorId) => (botId) =>
+    pluginStore.appAccessForBot({
+      userId: actorId,
+      agentId: botId,
+      composioConfigured: Boolean(composio),
+      ...(composio ? { directory: () => composio.broker.listApps() } : {}),
+      sharedAudience: sharedUseStore.admitsPerson,
+    }),
   signRunForActor,
   computerGuidance: config.computer ? computerGuidance : undefined,
   loadVendors,
@@ -1969,6 +2304,9 @@ const actorAgentResolver = createActorAgentResolver({
         actorId,
         botId,
         threadId: input.threadId,
+        runId: input.runId,
+        // The subagent carries on the asking run's task, on the asking run's surface.
+        ...productTelemetry.lineageOf(actorId, input.forwardedProps),
         initiator: initiator ?? PERSON_INITIATOR,
         ...(depth ? { depth } : {}),
       }),
@@ -1984,7 +2322,10 @@ const actorAgentResolver = createActorAgentResolver({
   get acquireLearnedSkills() {
     return copilotRuntime.learning?.acquire;
   },
-  loadPersonalMemoryForActor,
+  ...(memoryRuntime.loadForActor
+    ? { loadPersonalMemoryForActor: memoryRuntime.loadForActor }
+    : {}),
+  recordToolLimitRefusalForActor: toolLimitRecorder(bootAuditStore),
 });
 
 const copilotRuntime = mountCopilotRuntime(
@@ -1993,20 +2334,38 @@ const copilotRuntime = mountCopilotRuntime(
   identifyUser,
   identifyActor,
   {
+    productTelemetry,
+    decisionWaits: createDecisionWaits(database),
     onRunBusy: (input) => {
       void channelStore.signalBusy(input.threadId, input.busy).catch(() => {});
     },
     learningSettings,
+    // The environment's container, or a saved default, that this Intelligence was found not to have.
+    learningContainerForgotten: (containerId) =>
+      configuredLearning.forgotten(containerId) ||
+      learningSettingsStore.isSetAside(containerId),
     personalSkills: {
       containerFor: personalLearningSpaces.containerFor,
       openSkills: () => openSkillIndex.sources(),
+      // Read on every run, never from the index: an approval made on another replica counts at once.
+      withheld: (userIds) => skillApprovalStore.withheld(userIds),
       sharingAllowed: skillSharingInSnapshot,
     },
     trajectoryCapture: recorderExtension.trajectoryCapture,
   },
 );
 
+/** Reads one named skill from a container; throws when the runtime or the read is unavailable, null when absent. */
+const skillIn = async (containerId: string, name: string) => {
+  const read = await copilotRuntime.learning?.containerSkills(containerId);
+  if (!read || "unavailable" in read) {
+    throw new Error("Skills are unavailable.");
+  }
+  return read.skills.find((skill) => skill.name === name) ?? null;
+};
+
 const responsibilityEngine = createServerResponsibilityEngine({
+  productTelemetry,
   database,
   responsibilityStore,
   routineIntelligence,
@@ -2039,35 +2398,40 @@ const responsibilityAnswerTurn = ({
     kind: "responsibility",
     id: responsibility.id,
   };
-  const tools = responsibilityTools({
+  const goal = {
     store: responsibilityStore,
     engine: responsibilityEngine,
     ownerUserId: responsibility.ownerUserId,
     agentId: responsibility.agentId,
     channelId: responsibility.channelId,
-    ...(responsibilityRunId ? { responsibilityRunId } : {}),
-  });
+  };
   return createTurnRunner({
+    prepareRunInput: prepareProductRunInput,
+    onKnownStop: productTelemetry.stopKnown,
     admission: serverTurnAdmission,
     intelligence: routineIntelligence,
     runner: routineAgentRunner,
     components: componentCatalog,
     buildAgentFor: (input) => buildAgentFor({ ...input, initiator }),
-    toolsForTurn: async () => [
-      ...(await approvalComputerTools(
-        responsibility.ownerUserId,
-        responsibility.agentId,
-        initiator,
-      )),
-      ...tools.map((tool) => ({
-        definition: {
-          name: tool.name,
-          description: tool.description,
-          parameters: z.toJSONSchema(tool.parameters),
-        },
-        execute: (args: unknown) => tool.execute(args),
-      })),
-    ],
+    toolsForTurn: async () => {
+      // Before the model has any tool, so what repeats is read as this turn begins.
+      const tools = await answerTurnTools({ ...goal, responsibilityRunId });
+      return [
+        ...(await approvalComputerTools(
+          responsibility.ownerUserId,
+          responsibility.agentId,
+          initiator,
+        )),
+        ...tools.map((tool) => ({
+          definition: {
+            name: tool.name,
+            description: tool.description,
+            parameters: z.toJSONSchema(tool.parameters),
+          },
+          execute: (args: unknown) => tool.execute(args),
+        })),
+      ];
+    },
     learningContainerForThread: (input) =>
       copilotRuntime.learning?.containerForThread(input) ??
       Promise.resolve(undefined),
@@ -2082,7 +2446,8 @@ const responsibilitySweep = repeatAfterEach(async () => {
     if (
       report.succeeded.length ||
       report.failed.length ||
-      report.waiting.length
+      report.waiting.length ||
+      report.busy.length
     )
       console.info(
         JSON.stringify({ type: "responsibility-dispatch", ...report }),
@@ -2124,6 +2489,8 @@ const executeApprovedAction = createApprovedActionExecutor({
 });
 const approvalContinuationRunner = measureTurns(
   createTurnRunner({
+    prepareRunInput: prepareProductRunInput,
+    onKnownStop: productTelemetry.stopKnown,
     admission: serverTurnAdmission,
     intelligence: routineIntelligence,
     runner: routineAgentRunner,
@@ -2157,6 +2524,8 @@ const groupConversations = createGroupConversations({
     return bots;
   },
   runTurn: createTurnRunner({
+    prepareRunInput: prepareProductRunInput,
+    onKnownStop: productTelemetry.stopKnown,
     admission: serverTurnAdmission,
     intelligence: routineIntelligence,
     runner: routineAgentRunner,
@@ -2224,6 +2593,15 @@ const approvalSweep = repeatAfterEach(
     actorFor,
     // Assigned further down, once delivery is wired.
     notify: (scope, input) => deliveryNotifications(scope, input),
+    transcriptHolds: waitForReplyInTranscript({
+      read: async ({ ownerUserId, threadId }) =>
+        (
+          await routineIntelligence.getThreadMessages({
+            threadId,
+            userId: ownerUserId,
+          })
+        ).messages,
+    }),
   }),
   2_000,
 );
@@ -2236,9 +2614,6 @@ useSlackChannelMembership((input) =>
     ? deliveryProviders.slack.isMember(input)
     : Promise.resolve(false),
 );
-const authoriseDeliveryScope = async (scope: DeliveryScope) =>
-  (await deliveryScopeFor(scope.ownerUserId, scope.channelId, scope.agentId))
-    ?.threadId === scope.threadId;
 const deliveryRouter = createDeliveryRouter({
   store: deliveryStore,
   queue: createWorkQueue(database),
@@ -2275,6 +2650,7 @@ const deliveryRouter = createDeliveryRouter({
             content: input.text,
           },
           initiator: PERSON_INITIATOR,
+          telemetry: deliveryLineage(input.source, input.runId),
           signal: input.signal,
         },
         approvalContinuationRunner,
@@ -2353,10 +2729,13 @@ const taskSweep = repeatAfterEach(async () => {
  */
 const proactiveEngine = createProactiveEngine({
   store: proactiveStore,
-  memory: personalMemoryStore,
+  // A check-in forms memories only where there is memory.
+  ...(editionHasMemory(config.edition) ? { memory: personalMemoryStore } : {}),
   queue: createWorkQueue(database),
   owner: workOwner("proactive"),
   runTurn: createTurnRunner({
+    prepareRunInput: prepareProductRunInput,
+    onKnownStop: productTelemetry.stopKnown,
     admission: serverTurnAdmission,
     intelligence: routineIntelligence,
     runner: routineAgentRunner,
@@ -2411,6 +2790,8 @@ const wakeUpRunner = createWakeUpRunner({
   actorFor,
   channels: channelStore,
   runTurn: createTurnRunner({
+    prepareRunInput: prepareProductRunInput,
+    onKnownStop: productTelemetry.stopKnown,
     admission: serverTurnAdmission,
     intelligence: routineIntelligence,
     runner: routineAgentRunner,
@@ -2560,6 +2941,7 @@ let workOfferedListener: WorkOfferedListener | undefined;
 
 if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
   workOfferedListener = await startHandoffDelivery({
+    productTelemetry,
     config,
     database,
     bootAuditStore,
@@ -2619,9 +3001,14 @@ repeatAfterEach(
 const channelSummaries = {
   database,
   queue: createWorkQueue(database),
-  transcript: routineIntelligence,
+  // Not `routineIntelligence`: this sweep runs on every replica and often asks about a conversation
+  // before its first run has created the thread, and the base client printed that ordinary 404 as
+  // `Intelligence platform request failed` on whichever replica claimed it.
+  transcript: createIntelligenceClient(config.runtime.intelligence),
   title: createChannelTitler({
+    provider: runtimeModel.provider,
     model: runtimeModel.defaultModel,
+    ...(runtimeModel.plan ? { plan: runtimeModel.plan } : {}),
     resolveApiKey: resolveRuntimeModelApiKey,
   }),
   owner: workOwner("summariser"),
@@ -2668,6 +3055,10 @@ await installEnterpriseControls({
   ...(config.computer?.token ? { computerToken: config.computer.token } : {}),
   ...(config.webBotAuth ? { webBotAuth: config.webBotAuth } : {}),
   builtInModel: `${runtimeModel.provider}/${runtimeModel.defaultModel}`,
+  // The run gate records and judges the model a built-in run will use: the person's pick, or the
+  // default the catalogue chose.
+  pickedModel: async (actorId, threadId) =>
+    (await modelChoices.forRun(actorId, threadId)).model,
   people: peopleStore,
   initialAdminEmails: config.auth?.initialAdminEmails ?? [],
   recorders: {
@@ -2694,6 +3085,8 @@ const selfHostBannerIntelligence = createIntelligenceClient(
 
 // Said once, at boot, whether Intelligence will let this deployment use what it is licensed for. A
 // self-hosted Intelligence without a licence refuses memory quietly; this is the line that says why.
+// On a first install, an Intelligence installed beside this server is still running its migrations
+// when this first asks, so the check waits that out before it says anything (intelligence-startup.ts).
 void reportIntelligenceEntitlement({
   entitlements: () => selfHostBannerIntelligence.getRuntimeEntitlements(),
 });
@@ -2725,6 +3118,11 @@ const app = createApp(
     config.keyEncryptionKey,
     credentialStore,
     createAuditStore(database),
+    // The entry `resolveModelApiKey` reads, so a key added in the Vault is the one the Bots use.
+    {
+      provider: runtimeModel.provider,
+      keyId: tenantPackage.model.credentialSecretRef,
+    },
   ),
   createPackageStatusReader(database),
   // The runtime call: the model, per-actor agent loading, and the two identity
@@ -2789,7 +3187,7 @@ const app = createApp(
       return { text, isError: text.startsWith(REFUSAL_MARKER) };
     }
     const { name, args, botId, actorId, initiator } = input;
-    const memory = memoryTools({
+    const memory = offeredMemoryTools(config.edition, {
       store: personalMemoryStore,
       ingestion: memoryIngestion,
       ownerUserId: actorId,
@@ -2836,9 +3234,22 @@ const app = createApp(
     store: learningSettings,
     autoAssign: learningAutoAssign,
     status: copilotRuntime.learning?.status,
-    inspect: copilotRuntime.learning?.inspect,
+    // Read directly: the runtime client refuses a snapshot without dashboard links.
+    inspect: copilotRuntime.learning
+      ? createInspectorLearningReader(config.runtime.intelligence)
+      : undefined,
+    manage: learningProbeIntelligence.experimental.learning,
+    modelUnavailable: learningModelUnavailable(process.env),
+    skills: copilotRuntime.learning?.containerSkills,
+    approvals: skillApprovalStore,
+    people: createLearningPeople(database),
+    personSkill: (userId, name) =>
+      skillIn(personalLearningSpaces.containerFor(userId), name),
+    invalidate: () => openSkillIndex.invalidate(),
+    recordingTitles: recorderExtension.recordingTitles,
   },
   {
+    productTelemetry,
     approvals: approvalService,
     shared: { modes: accountModes, use: sharedUseStore },
     ...(signInService ? { passwords: signInService } : {}),
@@ -2849,22 +3260,20 @@ const app = createApp(
           botBrowser: {
             recorder: recorderExtension,
             openbotUrl: openbotAddress(config),
-            ...(config.computer?.token ? { token: config.computer.token } : {}),
             // The Bot's policy, which `botBrowserNetwork` widens while a recording runs, to the computer of the seat
-            // the recording is on: the person's own, or the isolated Bot's.
+            // the recording is on: the person's own, or the isolated Bot's. Under that computer's own token.
             pushPolicy: async (seat) => {
               const policy = await enterpriseControls()?.policyForBot(
                 seat.botId,
               );
               if (!policy) return;
+              const token = computerGateway.tokenFor(seat);
               await pushEgressPolicy(
                 await computerGateway.locate(seat),
                 seat.botId,
                 policy,
                 {
-                  ...(config.computer?.token
-                    ? { token: config.computer.token }
-                    : {}),
+                  ...(token ? { token } : {}),
                   ...(config.webBotAuth
                     ? { webBotAuth: config.webBotAuth }
                     : {}),
@@ -2877,15 +3286,16 @@ const app = createApp(
           },
         }
       : {}),
-    // Only where a person's browser can run: OpenBot Desktop's host-side computer, or computers Bots run on that give
-    // each its own. Where every Bot shares one, the routes have no computers and say why (browser/host.ts).
+    // Only where a person's browser can run: a host-side computer of people's browsers, computers Bots run on that give
+    // each its own, or the personal edition's one computer. Where every Bot shares one, the routes have no computers and
+    // say why (browser/host.ts).
     ...(computerGateway || config.browser
       ? {
           browser: {
             ...personBrowserPlace({
               provider: computerProvider,
               browserUrl: config.browser?.url,
-              ...(config.browserAbsent ? { absent: config.browserAbsent } : {}),
+              edition: config.edition,
               computers: () =>
                 computerGateway
                   ? gatewayBrowserComputers(
@@ -2900,9 +3310,6 @@ const app = createApp(
                         : {}),
                     }),
             }),
-            ...((config.computer?.token ?? config.browser?.token)
-              ? { token: config.computer?.token ?? config.browser?.token }
-              : {}),
             recorder: recorderExtension,
             openbotUrl: openbotAddress(config),
             // On a single-user OpenBot the person is its admin: a setup failure is theirs to see to.
@@ -2910,13 +3317,62 @@ const app = createApp(
           },
         }
       : {}),
+    learningModel: learningModelEndpoint,
+    boundaryWriter: writeBoundaries,
+    approvalRules: { vocabulary: () => loadRuleVocabulary(database) },
+    auditQuestions: {
+      complete: askTheAuditTrail,
+      vocabulary: () => readAuditVocabulary(database, () => policyStore.get()),
+    },
+    // The stores the live path decides from: the same boundary, controls snapshot, grants and gate.
+    whatIf: {
+      complete: readWhatIfQuestions,
+      vocabulary: () => readWhatIfVocabulary(database),
+      readers: {
+        policy: () => policyStore.get(),
+        enterprise: () => {
+          const controls = enterpriseControls();
+          return controls ? { snapshot: controls.snapshot() } : null;
+        },
+        grant: (ref, botId) => pluginStore.decide("mcp", ref, botId),
+        ...(approvalService.store.policy
+          ? {
+              approvals: {
+                policy: approvalService.store.policy,
+                rules: (owner: string) => approvalService.store.rules(owner),
+              },
+            }
+          : {}),
+      },
+      event: (id) => readAuditEvent(database, id),
+    },
     personalLearning: {
       store: learningSharingStore,
+      ...(learningModelEndpoint?.calls
+        ? { modelCalls: learningModelEndpoint.calls }
+        : {}),
+      approvals: skillApprovalStore,
+      autoApprover,
       skillsOf: (userId) =>
         copilotRuntime.learning?.personalSkills(userId) ??
         Promise.resolve({ unavailable: "unavailable" as const }),
+      skillOf: (userId, name) =>
+        skillIn(personalLearningSpaces.containerFor(userId), name),
+      containerSkills: (id) =>
+        copilotRuntime.learning?.containerSkills(id) ??
+        Promise.resolve({ unavailable: "unavailable" as const }),
       invalidate: () => openSkillIndex.invalidate(),
       sharingAllowed: skillSharingAllowed,
+      manage: learningProbeIntelligence.experimental.learning,
+      modelUnavailable: learningModelUnavailable(process.env),
+      recordingTitles: recorderExtension.recordingTitles,
+      settings: learningSettings,
+      scopesFor: async (actor) =>
+        learningScopes({
+          edition: currentEdition(),
+          userId: actor.id,
+          settings: await learningSettings.read(),
+        }),
     },
     delivery: {
       authenticated: {
@@ -2969,6 +3425,36 @@ const app = createApp(
       tasks: taskRunner,
       auditStore: bootAuditStore,
     },
+    models: modelCatalogue,
+    modelChoices,
+    // The checklist onboarding ends on. Facts and verdicts about this configuration, never values.
+    setup: createSetupSources({
+      productName: tenantPackage.productName,
+      config,
+      environment: process.env,
+      model: {
+        provider: runtimeModel.provider,
+        keyId: tenantPackage.model.credentialSecretRef,
+        defaultModel: runtimeModel.defaultModel,
+        plan: Boolean(runtimeModel.plan),
+        check: checkModelAvailability,
+      },
+      credentials: credentialStore,
+      modelCheckAtBoot,
+      entitlements: () => selfHostBannerIntelligence.getRuntimeEntitlements(),
+      computer: Boolean(config.computer),
+      computerCheck: createComputerCheck({
+        provider: computerProvider,
+        controls: enterpriseControls,
+        ...(config.computer?.token ? { token: config.computer.token } : {}),
+        ...(config.webBotAuth ? { webBotAuth: config.webBotAuth } : {}),
+      }),
+      apps: {
+        configured: Boolean(composio),
+        provider: composio?.provider ?? config.brokerProvider ?? "composio",
+      },
+      chat: Boolean(deliveryProviders.slack),
+    }),
   },
   createSelfHostBanner({
     enabled: config.selfHostBanner,
@@ -3013,10 +3499,13 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     personResponseSweep.stop();
     groupSweep.stop();
     recorderExpirySweep.stop();
+    if (firstAutoApproveSweep) clearTimeout(firstAutoApproveSweep);
+    if (autoApproveTimer) clearInterval(autoApproveTimer);
     for (const sweep of deliverySweeps) sweep.stop();
     telegramSweep?.stop();
     telegramAbort.abort();
     void Promise.allSettled([
+      productTelemetry.flush(),
       channelActivityListener.stop(),
       policyListener.stop(),
       // Started only where handing work between Bots is switched on, so it is often not there.

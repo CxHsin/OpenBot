@@ -2,12 +2,13 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { setDefaultAutoSelectFamily } from "node:net";
 import { join } from "node:path";
 import { type ServerWebSocket, serve } from "bun";
-import type { Page } from "playwright";
+import type { ConsoleMessage, Page } from "playwright";
 import { downloadHeaders } from "../../shared/file-download";
 import {
   isPersonBrowserId,
   RECORDER_DIR_ENV,
 } from "../../shared/openbot-browser";
+import { unfinishedAction } from "./action-failure";
 import {
   cutAtCodeUnits,
   parseAriaSnapshot,
@@ -32,9 +33,16 @@ import {
   SnapshotRequiredError,
   TAKE_CONTROL_FIRST,
 } from "./control";
+import { keyForOpenList } from "./dropdown-list";
 import { handleEgressPolicyRequest, startEgressFilter } from "./egress";
 import { enterText, FieldValueError } from "./enter-text";
 import { identity } from "./identity";
+import { createInputQueue, type InputQueue } from "./input-queue";
+import {
+  LOOPBACK_RELAYS_ENV,
+  parseLoopbackRelays,
+  startLoopbackRelays,
+} from "./loopback-relay";
 import {
   assertPageAccess,
   navigateWebPage,
@@ -86,6 +94,11 @@ import {
   WorkspaceFileTooLargeError,
   WorkspacePathError,
 } from "./workspace";
+import {
+  createTerminalSockets,
+  TERMINAL_UNAVAILABLE,
+  type TerminalSocketData,
+} from "./terminal-socket";
 import { createWorkspaces } from "./workspaces";
 
 /**
@@ -211,6 +224,11 @@ const sessions = createSessions({
   profilesDirectory: process.env.PROFILES_DIR?.trim() || "/profiles",
   // A recording in the Bot's browser is the person's who holds the wheel, and ends the moment they no longer do.
   onWheelLeft: (botId) => botBrowser.wheelLeft(botId),
+  // A navigation and the two element waits an action can make after it: past that, an action is not finishing.
+  turnLimitMs: numberFromEnv(
+    "BROWSER_TURN_LIMIT_MS",
+    NAVIGATION_TIMEOUT_MS + 2 * ACTION_TIMEOUT_MS,
+  ),
 });
 
 /**
@@ -304,6 +322,14 @@ const workspaces = createWorkspaces(
   process.env.COMPUTER_SEPARATE_WORKSPACES?.trim().toLowerCase() === "on",
 );
 
+/** Each seat's live shell, as a terminal a person watches and, holding the wheel, types into. */
+const terminalSockets = createTerminalSockets<StreamData & TerminalSocketData>({
+  shellFor: async (seat) => (await workspaces.for(seat)).shell.terminal,
+  mayType: (seat) => sessions.for(seat).control.humanMayDrive(),
+  takeControlFirst: TAKE_CONTROL_FIRST,
+  describe,
+});
+
 /**
  * Who has the wheel, as a state machine in its own module.
  *
@@ -334,6 +360,12 @@ const workspaces = createWorkspaces(
 // Only the running computer points its shell at it: a test that imports this module shares its
 // process with every later test.
 await startEgressFilter({ forShell: import.meta.main });
+// The deployment's loopback addresses, where a browser here is handed one (OpenBot Desktop). Before any browser exists,
+// so a Recorder never connects to an address that is not there yet. See loopback-relay.ts.
+if (import.meta.main)
+  await startLoopbackRelays(
+    parseLoopbackRelays(process.env[LOOPBACK_RELAYS_ENV]),
+  );
 const profiles = createProfiles(
   process.env.PROFILES_DIR?.trim() || "/profiles",
   async (botId) => {
@@ -737,12 +769,119 @@ async function notePersonFilled(
   }
 }
 
+/*
+ * A refusal or a failure of one input is sent as `input-error`, not `error`: the screen is still live,
+ * and the person only needs to hear that this one did not land. An `error` ends the stream on the
+ * surface (it puts up the Retry panel and reconnects), which one dispatch that failed, or a key typed a
+ * moment before the wheel was theirs, has no reason to do.
+ */
+
 /** What a live-screen socket carries: the Bot whose screen it is showing. */
 type StreamData = {
   botId: string;
-  /** The person's input so far, applied one message after another. */
-  inputs?: Promise<void>;
+  /** The person's input so far, applied one message after another. See input-queue.ts. */
+  inputs?: InputQueue;
+  /** The newest frame not sent yet: the connection or the viewer has enough on its way. */
+  heldFrame?: string;
+  /** Looks again for room for `heldFrame`; see `sendHeldFrame`. */
+  heldRetry?: ReturnType<typeof setTimeout>;
+  /** Since when `heldFrame` has waited on the viewer with no confirmation. See `CONFIRM_LIMIT_MS`. */
+  heldSince?: number;
+  /** The viewer says when each frame reached it. See `FRAME_RECEIVED`. */
+  confirms?: boolean;
+  /**
+   * Frames sent since `HELLO` that the viewer has not said it received.
+   *
+   * Every one of them, from the first, and not only those sent once the first confirmation came back:
+   * counted from then, every frame already on its way when it did was later confirmed against frames
+   * it had never been counted with, and the allowance grew by that many for good. On a slow link that
+   * was a dozen frames and seconds of lag, the thing the count is for.
+   */
+  unconfirmed?: number;
 };
+
+/**
+ * What the screen sends back as each frame reaches it, once this computer has said (`HELLO`) that it
+ * listens for it. The server's proxy says it too, for a frame it let go because a newer one replaced it.
+ *
+ * Waiting only for this socket's own buffer to empty is not enough: the operating system takes bytes
+ * off it long before they reach the person, and on a slow link seconds of frames sat in between,
+ * measured at 400 KB/s as frames still arriving seven seconds after the page stopped moving. Counting
+ * what the viewer has actually received bounds that to `FRAMES_IN_FLIGHT`. A newer frame is held
+ * rather than queued while that many are on their way, and sent the moment one arrives.
+ */
+const FRAME_RECEIVED = '{"type":"frame-received"}';
+const HELLO = JSON.stringify({ type: "hello", confirmFrames: true });
+const FRAMES_IN_FLIGHT = 2;
+/** How long a frame may wait with no confirmation before those on their way are taken as lost. */
+const CONFIRM_LIMIT_MS = 2_000;
+
+/**
+ * How much may sit unsent on a live-screen socket before a new frame is held back: about one frame.
+ * More than that and the person is watching the past.
+ */
+const STREAM_BUFFER_LIMIT = 128 * 1024;
+
+/** How often a held frame looks again for room, besides when Bun says the socket drained. */
+const HELD_FRAME_RETRY_MS = 50;
+
+/**
+ * Send the held frame, if there is room for it: the connection has taken the frames before it and, for
+ * a viewer that confirms, fewer than `FRAMES_IN_FLIGHT` are still on their way to it.
+ *
+ * A frame is held, never queued, and a newer one replaces it: the person sees the page as it is by the
+ * time there is room, and never a backlog. Held rather than dropped, because the frame that arrives
+ * while the connection is busy is often the last one the page makes before it goes still, and Chrome
+ * sends nothing more for a still page: dropped, the screen stayed on the page as it was a moment
+ * before it stopped.
+ *
+ * Bun's `drain` is the quick way to hear there is room, and not the only one: a frame sent from inside
+ * `drain` that did not fit was sometimes followed by no further `drain` at all (measured in the
+ * server's proxy, which does the same, at about one time in twenty). So while a frame is held the
+ * socket is also looked at again shortly, which is also when confirmations that never came are given
+ * up on. `onGone` is told when the socket has gone.
+ */
+function sendHeldFrame(ws: ServerWebSocket<StreamData>, onGone: () => void) {
+  const held = ws.data.heldFrame;
+  if (held === undefined) return;
+  let waitingOnViewer =
+    ws.data.confirms === true && (ws.data.unconfirmed ?? 0) >= FRAMES_IN_FLIGHT;
+  if (waitingOnViewer) {
+    ws.data.heldSince ??= Date.now();
+    if (Date.now() - ws.data.heldSince >= CONFIRM_LIMIT_MS) {
+      // Nothing came back: those frames are taken as lost, so the screen is not left stale.
+      ws.data.unconfirmed = 0;
+      waitingOnViewer = false;
+    }
+  }
+  if (waitingOnViewer || ws.getBufferedAmount() > STREAM_BUFFER_LIMIT) {
+    ws.data.heldRetry ??= setTimeout(() => {
+      ws.data.heldRetry = undefined;
+      sendHeldFrame(ws, onGone);
+    }, HELD_FRAME_RETRY_MS);
+    return;
+  }
+  clearTimeout(ws.data.heldRetry);
+  ws.data.heldRetry = undefined;
+  ws.data.heldSince = undefined;
+  ws.data.heldFrame = undefined;
+  ws.data.unconfirmed = (ws.data.unconfirmed ?? 0) + 1;
+  try {
+    ws.send(held);
+  } catch {
+    onGone();
+  }
+}
+
+/** One frame reached the viewer: room for the next. */
+function frameReceived(ws: ServerWebSocket<StreamData>) {
+  ws.data.confirms = true;
+  ws.data.unconfirmed = Math.max(0, (ws.data.unconfirmed ?? 0) - 1);
+  // The viewer is answering, so the wait for a lost confirmation starts again.
+  ws.data.heldSince = undefined;
+  // A socket that has gone is released by its close.
+  sendHeldFrame(ws, () => undefined);
+}
 
 /**
  * Apply one thing the person did on the live screen, after asking whether the screen is theirs and
@@ -768,7 +907,7 @@ async function applyInput(
   if (standing.state !== "casting") {
     ws.send(
       JSON.stringify({
-        type: "error",
+        type: standing.state === "starting" ? "input-error" : "error",
         error:
           standing.state === "starting"
             ? SCREEN_STILL_STARTING
@@ -782,14 +921,16 @@ async function applyInput(
     const parsed: unknown = JSON.parse(String(raw));
     const validated = parseInputMessage(parsed);
     if (!validated.ok) {
-      ws.send(JSON.stringify({ type: "error", error: validated.error }));
+      ws.send(JSON.stringify({ type: "input-error", error: validated.error }));
       return;
     }
     message = validated.message;
   } catch {
     // The validated-but-wrong branch above sends an error frame; unparseable input used to
     // be dropped silently, so a buggy surface saw input "ignored" with no diagnostic.
-    ws.send(JSON.stringify({ type: "error", error: "Input is not JSON." }));
+    ws.send(
+      JSON.stringify({ type: "input-error", error: "Input is not JSON." }),
+    );
     return;
   }
   // A person's input is accepted only while they hold the wheel. The socket being open is not permission:
@@ -805,7 +946,7 @@ async function applyInput(
   // A person's own browser needs no handover: nobody else works in it, so it starts, and stays,
   // with the person holding the wheel.
   if (!isPersonBrowserId(ws.data.botId) && !session.control.humanMayDrive()) {
-    ws.send(JSON.stringify({ type: "error", error: TAKE_CONTROL_FIRST }));
+    ws.send(JSON.stringify({ type: "input-error", error: TAKE_CONTROL_FIRST }));
     return;
   }
   session.humanInputs += 1;
@@ -824,14 +965,14 @@ async function applyInput(
     );
     ws.send(
       JSON.stringify({
-        type: "error",
+        type: "input-error",
         error: describe(error, "That input could not be applied."),
       }),
     );
   }
 }
 
-serve<StreamData>({
+serve<StreamData & TerminalSocketData>({
   port: PORT,
   ...(RUNTIME.hostname ? { hostname: RUNTIME.hostname } : {}),
   idleTimeout: 120,
@@ -842,7 +983,7 @@ serve<StreamData>({
    * page changes and input goes back over the same connection. See screencast.ts for why polling was
    * not good enough once a person had to type into this.
    */
-  websocket: {
+  websocket: terminalSockets.around({
     async open(ws) {
       const session = sessions.for(ws.data.botId);
       /*
@@ -864,13 +1005,15 @@ serve<StreamData>({
         }
       });
       try {
+        // Says this computer listens for `FRAME_RECEIVED`. A screen from before it ignores a message it
+        // does not know, and a screen that does know sends confirmations only after hearing this, so
+        // neither side ever sends the other something it would refuse.
+        ws.send(HELLO);
         const send = (frame: unknown) => {
+          // The newest frame, held until there is room for it; see `sendHeldFrame`.
+          ws.data.heldFrame = JSON.stringify(frame);
           // A closed socket starts a fresh cast on the next connection.
-          try {
-            ws.send(JSON.stringify(frame));
-          } catch {
-            void session.viewer.release(ws);
-          }
+          sendHeldFrame(ws, () => void session.viewer.release(ws));
         };
 
         /*
@@ -881,6 +1024,15 @@ serve<StreamData>({
         const attach = async () => {
           const target = await currentPage(ws.data.botId);
           if (target === casting) return;
+          /*
+           * THE WINDOW FITTED TO THE PAGE THE SCREEN IS ABOUT TO SHOW, every time it starts showing one. A tab laid out
+           * again (in front again after a person closed the one before it) takes what its window has then, and a window
+           * fitted for another tab can have less: Chromium's warning bar for `--no-sandbox` sits in a Bot's first tab and
+           * is only made room for when that tab is laid out again, so it came back 56 pixels short and the screen showed
+           * a black band under the page, after Hand back too. Fitted here, from the tab as it is now laid out, it holds
+           * the whole page. A Bot's browser only: a person's is fitted as its tabs open, and local Chrome is theirs.
+           */
+          await profiles.bot(ws.data.botId)?.fitWindow(target);
           const cast = await startScreencast(target, send);
           // The claim stops a cast it refuses, so a launch that lost the screen leaks nothing.
           if (!(await claim.install(cast))) return;
@@ -914,23 +1066,38 @@ serve<StreamData>({
      * One message at a time, in the order the person sent them. Applying one is a trip to the
      * browser, and a message whose trip is shorter than the one before it must still land after it:
      * applied as each was ready, a key came up before it went down (every key up of a word before
-     * any of its key downs, measured with a page busy 20 ms per key down). Nothing else here holds a
-     * message, and a message refused or failed says so and lets the next one through.
+     * any of its key downs, measured with a page busy 20 ms per key down). A move or a scroll still
+     * waiting is folded into the next one of its kind (input-queue.ts); nothing else is held, and a
+     * message refused or failed says so and lets the next one through.
      */
     message(ws, raw) {
-      ws.data.inputs = (ws.data.inputs ?? Promise.resolve())
-        .then(() => applyInput(ws, raw))
-        .catch((error: unknown) => {
+      // Not input: the screen saying a frame reached it, which goes nowhere near the input queue.
+      if (raw === FRAME_RECEIVED) {
+        frameReceived(ws);
+        return;
+      }
+      ws.data.inputs ??= createInputQueue(
+        (input) => applyInput(ws, input),
+        (error) =>
           console.error(
             JSON.stringify({
               type: "screencast-input-error",
               error: String(error),
             }),
-          );
-        });
+          ),
+      );
+      ws.data.inputs.push(String(raw));
+    },
+
+    /** Room on the connection again: the frame held while it was busy goes now. */
+    drain(ws) {
+      // A socket that has gone is released by its close.
+      sendHeldFrame(ws, () => undefined);
     },
 
     async close(ws) {
+      clearTimeout(ws.data.heldRetry);
+      ws.data.heldFrame = undefined;
       // Names the socket, so it can only ever give up its own screen. A superseded socket closing
       // after its replacement has started releases nothing; see viewer.ts.
       //
@@ -939,7 +1106,7 @@ serve<StreamData>({
       // map is meant to shrink in.
       await sessions.get(ws.data.botId)?.viewer.release(ws);
     },
-  },
+  }),
   async fetch(request, server) {
     const url = new URL(request.url);
 
@@ -987,7 +1154,7 @@ serve<StreamData>({
       ? null
       : refusedHere(
           OWNER,
-          url.pathname === "/stream"
+          url.pathname === "/stream" || url.pathname === "/terminal"
             ? seatOf(request, url.searchParams).bot
             : requestBot,
         );
@@ -1026,11 +1193,35 @@ serve<StreamData>({
      * refused by being added to it rather than by remembering to repeat this.
      */
     let releaseAction: (() => void) | undefined;
+    let releaseTurn: (() => void) | undefined;
     try {
       if (actsOnTheComputer(url.pathname)) {
         releaseAction = session.control.admitBotAction(
           mutatesBrowser(url.pathname),
         );
+      }
+
+      /*
+       * The browser's turn, before anything else is awaited, so actions take it in the order they arrived: a model
+       * that calls tools in parallel sends a form's worth of typing at once, and side by side each took the focus
+       * from the others (browser-turns.ts). A look at the page waits for what was sent before it and holds nothing.
+       */
+      const turn = HOLDS_THE_BROWSER.has(url.pathname)
+        ? session.turns.hold(request.signal).then((release) => {
+            releaseTurn = release;
+          })
+        : WAITS_FOR_THE_BROWSER.has(url.pathname)
+          ? session.turns.after(request.signal)
+          : undefined;
+      if (turn) {
+        try {
+          await turn;
+        } catch (error) {
+          // Its caller went away while it waited: it never ran, and nothing is listening for the answer.
+          if (request.signal.aborted)
+            return json({ error: "Stopped.", stopped: true }, 499);
+          throw error;
+        }
       }
 
       if (url.pathname === "/stream") {
@@ -1045,6 +1236,30 @@ serve<StreamData>({
           return json({ error: "That is not a usable bot id." }, 400);
         }
         if (server.upgrade(request, { data: { botId: streamBotId } }))
+          return undefined as unknown as Response;
+        return json({ error: "Expected a WebSocket upgrade." }, 400);
+      }
+
+      /*
+       * The seat's live shell, as a terminal (live-shell.ts). Named in the query for the reason the
+       * stream is. A person's own browser has no shell, so its id is refused here. Where commands are
+       * turned off the socket still opens, to say so, which a refused upgrade could not.
+       */
+      if (url.pathname === "/terminal") {
+        const named = seatOf(request, url.searchParams);
+        if (named.seat === undefined)
+          return json({ error: "That is not a usable bot id." }, 400);
+        if (isPersonBrowserId(named.bot))
+          return json({ error: PERSONS_OWN_BROWSER }, 403);
+        if (
+          server.upgrade(request, {
+            data: {
+              botId: named.seat,
+              kind: "terminal" as const,
+              ...(RUNTIME.allowExec ? {} : { refused: TERMINAL_UNAVAILABLE }),
+            },
+          })
+        )
           return undefined as unknown as Response;
         return json({ error: "Expected a WebSocket upgrade." }, 400);
       }
@@ -1101,7 +1316,8 @@ serve<StreamData>({
         return json(state);
       }
 
-      // The Bot asking for one value it must not be told. It has already focused the field.
+      // The Bot asking for one value it must not be told, naming the field by its ref. It does not click it first:
+      // the value is put into that field below, when the person sends it.
       if (url.pathname === "/control/secret" && request.method === "POST") {
         const body = (await request.json().catch(() => null)) as {
           label?: unknown;
@@ -1351,6 +1567,12 @@ serve<StreamData>({
         session.control.interrupt(
           "The computer stopped; the previous task was interrupted.",
         );
+        // Its shell too: stopping a computer stops what it was running.
+        workspaces
+          .existingShell(botId)
+          ?.terminal.restart(
+            "The computer stopped, so the shell ended. A new one starts when it's next used.",
+          );
         await botBrowser.settled(botId);
         return json({ stopped: true, wasRunning });
       }
@@ -1390,6 +1612,11 @@ serve<StreamData>({
         session.control.interrupt(
           "The computer was reset; the previous task was interrupted.",
         );
+        workspaces
+          .existingShell(botId)
+          ?.terminal.restart(
+            "The computer was reset, so the shell ended. A new one starts when it's next used.",
+          );
         await botBrowser.settled(botId);
         /*
          * And a new run, because the browser this session described is gone.
@@ -1426,7 +1653,9 @@ serve<StreamData>({
         const startedAt = Date.now();
         try {
           const target = await currentPage(botId, "navigate");
-          session.control.assertBotMayAct(true);
+          // Opening an address needs no fresh look after a handback (`mutatesBrowser`). Following a
+          // link off the page does: it acts on that page, as a click on the link would.
+          session.control.assertBotMayAct(citation !== undefined);
           // A followed link is checked against the live page as a click on it would be: the snapshot
           // it came from must still be current, the ref must still name an element, and that element
           // must still go where the server was told it goes. Otherwise it is stale, and nothing opens.
@@ -1463,6 +1692,8 @@ serve<StreamData>({
           // Bumping the generation makes an action carrying one fail with "take a new snapshot" rather
           // than fall through to a selector that matches nothing and read as a missing element.
           session.snapshotId += 1;
+          // And the page a person handed back is gone, so the Bot has nothing of theirs left to look at.
+          session.control.pageReplaced();
           const extract = await readablePageText(target);
           return json({
             url: target.url(),
@@ -1712,9 +1943,20 @@ serve<StreamData>({
         }
 
         const startedAt = Date.now();
+        // What the page logs while the action runs: a form its own security policy refuses to send
+        // is reported only there (see action-failure.ts). Capped, so a page that logs errors in a
+        // loop cannot grow it for the length of the action.
+        const logged: string[] = [];
+        const listen = (message: ConsoleMessage) => {
+          if (message.type() === "error" && logged.length < 50)
+            logged.push(message.text());
+        };
+        let watched: Page | undefined;
         try {
           const target = await currentPage(botId);
           session.control.assertBotMayAct(true);
+          watched = target;
+          target.on("console", listen);
           const detail = await performAction(
             session,
             target,
@@ -1761,7 +2003,20 @@ serve<StreamData>({
           if (error instanceof FieldValueError) {
             return json({ error: error.message }, 400);
           }
+          // The element is on the page and the action could not finish: the page refused to send its
+          // form, something covers the element, it is hidden or turned off, or the page is still
+          // loading what the action set off. Said as that, and marked so the server does not read the
+          // timeout as a ref that has gone (action-failure.ts).
+          const unfinished = unfinishedAction(error, logged);
+          if (unfinished) {
+            return json(
+              { error: unfinished.message, unfinished: unfinished.reason },
+              409,
+            );
+          }
           return json({ error: describe(error, "The action failed.") }, 502);
+        } finally {
+          watched?.off("console", listen);
         }
       }
 
@@ -1791,6 +2046,7 @@ serve<StreamData>({
         );
       throw error;
     } finally {
+      releaseTurn?.();
       releaseAction?.();
     }
   },
@@ -1806,6 +2062,21 @@ type ActionBody = {
 };
 
 const ACTIONS = new Set(["/click", "/type", "/key", "/scroll"]);
+
+/**
+ * What the Bot does to its browser, one at a time (browser-turns.ts). A snapshot is here because it stamps the page and
+ * moves the snapshot on, so an action must not resolve a ref while one is being taken.
+ */
+const HOLDS_THE_BROWSER = new Set([
+  "/navigate",
+  ...ACTIONS,
+  "/snapshot",
+  "/sign-in/fill",
+  "/sign-in/code",
+]);
+
+/** A look at the page: after what was sent before it, beside what is sent after it. */
+const WAITS_FOR_THE_BROWSER = new Set(["/screenshot", "/read"]);
 
 const HUMAN_INPUT = new Set([
   "/human/click",
@@ -1930,7 +2201,9 @@ async function performAction(
       .evaluate(unmarkPersonFilled, PERSON_FILLED_ATTRIBUTE)
       .catch(() => undefined);
     if (body.submit === true) {
-      await field.press("Enter", acting);
+      // Enter on a dropdown whose list is open would accept the list's stale highlight over the
+      // choice just typed, so it closes the list instead (dropdown-list.ts).
+      await field.press(await keyForOpenList(target, "Enter", field), acting);
     }
     // The text itself is deliberately NOT returned. It is echoed nowhere: this response is read by
     // the model and logged by the server, and a value typed into a form is exactly where a password
@@ -1948,13 +2221,15 @@ async function performAction(
     if (typeof body.key !== "string" || !body.key) {
       throw new Error("A key press needs a key name, such as Enter or Tab.");
     }
+    // An Enter meant for a dropdown's open list closes it, keeping the Bot's choice (dropdown-list.ts).
     if (ref) {
-      await (await resolveRef(session, target, ref, expected)).press(
-        body.key,
+      const element = await resolveRef(session, target, ref, expected);
+      await element.press(
+        await keyForOpenList(target, body.key, element),
         acting,
       );
     } else {
-      await target.keyboard.press(body.key);
+      await target.keyboard.press(await keyForOpenList(target, body.key));
     }
     return { action: "key", key: body.key, ref, url: target.url() };
   }

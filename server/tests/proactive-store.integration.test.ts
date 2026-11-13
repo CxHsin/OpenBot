@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { createAuditStore } from "../src/audit";
 import { createCredentialStore } from "../src/credentials";
 import { createDatabase } from "../src/db/client";
@@ -90,16 +90,56 @@ const settingInput = {
   intervalMinutes: 60,
 };
 
-test("settings are owner scoped, one per Bot, and bounded in frequency", async () => {
+test("a Bot watches several things, each once, and an offer accepted again turns it back on", async () => {
+  const brief = {
+    ...settingInput,
+    agentId: secondBot,
+    subject: "Launch brief in Notion",
+    sourceLink: "https://www.notion.so/launch-brief",
+    intervalMinutes: 1440,
+  };
+  const inbox = {
+    ...settingInput,
+    agentId: secondBot,
+    subject: "Your Gmail inbox",
+    intervalMinutes: 1440,
+  };
+  const first = await proactive.create(owner, brief, `${prefix}-b1`);
+  const second = await proactive.create(owner, inbox, `${prefix}-b2`);
+  expect(second.id).not.toBe(first.id);
+  expect(first).toMatchObject({
+    subject: "Launch brief in Notion",
+    sourceLink: "https://www.notion.so/launch-brief",
+  });
+  await proactive.update(owner, first.id, { enabled: false });
+  const again = await proactive.create(
+    owner,
+    { ...brief, subject: "The launch brief", intervalMinutes: 240 },
+    `${prefix}-b3`,
+  );
+  expect(again).toMatchObject({
+    id: first.id,
+    enabled: true,
+    intervalMinutes: 240,
+  });
+  const mine = (await proactive.list(owner)).filter(
+    (row) => row.agentId === secondBot,
+  );
+  expect(mine).toHaveLength(2);
+  for (const row of mine) await proactive.remove(owner, row.id);
+});
+
+test("settings are owner scoped, one per thing a Bot watches, and bounded in frequency", async () => {
   const setting = await proactive.create(owner, settingInput, `${prefix}-t`);
   expect(setting).toMatchObject({
     enabled: true,
     intervalMinutes: 60,
     lastStatus: "idle",
   });
-  await expect(
-    proactive.create(owner, settingInput, `${prefix}-t2`),
-  ).rejects.toBeInstanceOf(ProactiveRefusedError);
+  // The same thing again is the same check-in, not a second one.
+  expect((await proactive.create(owner, settingInput, `${prefix}-t2`)).id).toBe(
+    setting.id,
+  );
   await expect(
     proactive.create(
       owner,
@@ -174,6 +214,53 @@ test("a due setting is claimed once and its next run moves forward by its interv
     (await proactive.claimDue(10)).some((row) => row.id === setting.id),
   ).toBe(false);
   await proactive.update(owner, setting.id, { enabled: true });
+});
+
+test("a next check-in is counted on this server's clock, which the sweep decides on, even with the database's clock ahead", async () => {
+  // A database whose `now()` reads a minute ahead of this server: this connection finds a stand-in
+  // `now()` before Postgres's own.
+  const clock = `clock_ahead_${randomUUID().replaceAll("-", "")}`;
+  await database.execute(sql.raw(`create schema ${clock}`));
+  await database.execute(
+    sql.raw(
+      `create function ${clock}.now() returns timestamptz language sql stable as $$ select pg_catalog.now() + interval '1 minute' $$`,
+    ),
+  );
+  const url = new URL(testDatabaseUrl());
+  url.searchParams.set("search_path", `${clock},public,pg_catalog`);
+  const ahead = createDatabase(url.toString(), { max: 1 });
+  const store = createProactiveStore(ahead);
+  const minutesOut = (row: { nextRunAt: Date }) =>
+    (row.nextRunAt.getTime() - Date.now()) / 60_000;
+  try {
+    const created = await store.create(
+      owner,
+      { ...settingInput, subject: "The clock", intervalMinutes: 240 },
+      `${prefix}-clock`,
+    );
+    expect(minutesOut(created)).toBeLessThanOrEqual(240);
+    const changed = await store.update(owner, created.id, {
+      intervalMinutes: 120,
+    });
+    expect(minutesOut(changed)).toBeLessThanOrEqual(120);
+    await store.update(owner, created.id, { enabled: false });
+    expect(
+      minutesOut(await store.update(owner, created.id, { enabled: true })),
+    ).toBeLessThanOrEqual(120);
+    await ahead
+      .update(proactiveSettings)
+      .set({ nextRunAt: new Date(Date.now() - 1000) })
+      .where(eq(proactiveSettings.id, created.id));
+    const [claimed] = (await store.claimDue(10)).filter(
+      (row) => row.id === created.id,
+    );
+    if (!claimed) throw new Error("the due check-in was not claimed");
+    expect(minutesOut(claimed)).toBeLessThanOrEqual(120);
+    await store.remove(owner, created.id);
+  } finally {
+    await ahead.$client.close();
+    await database.execute(sql.raw(`drop schema ${clock} cascade`));
+  }
 });
 
 test("a run's reads come from its own successful audit rows only", async () => {

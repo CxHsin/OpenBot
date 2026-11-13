@@ -66,8 +66,16 @@ export type ChannelWork =
 
 /** A channel plus what the roster renders about it. */
 export type ChannelSummary = AgentChannel & {
-  /** A few words about the conversation, or null. The roster falls back to `name`. */
+  /**
+   * What the conversation is called, or null: the name its owner gave it, else a few words the
+   * server wrote about it. The roster falls back to `opening`, then `name`.
+   */
   summary: string | null;
+  /**
+   * The person's first words in the conversation, as one plain line, or null. What it is called
+   * until `summary` names it. Absent from a server that predates it, which reads as null.
+   */
+  opening?: string | null;
   lastMessage: string | null;
   lastMessageAgentId: string | null;
   /** ISO-8601. Ordering falls back to this, so a channel just created sorts to the top. */
@@ -76,6 +84,11 @@ export type ChannelSummary = AgentChannel & {
   pinned: boolean;
   /** ISO-8601 when this member last had the channel open, or null for never. The caller's, only. */
   lastReadAt: string | null;
+  /**
+   * Whether this member started the conversation and so may rename it. The server's answer, which
+   * it enforces too. Absent from a server that predates renaming, which reads as no.
+   */
+  canRename?: boolean;
   /**
    * Whether a turn is running in this channel right now.
    *
@@ -95,6 +108,14 @@ export type ChannelSummary = AgentChannel & {
 export const channelKeys = {
   all: ["channels"] as const,
   list: () => ["channels", "list"] as const,
+  /** Every search of the roster, to refetch them together. Never a prefix of `list`. */
+  searches: () => ["channels", "search"] as const,
+  /**
+   * One search, by its normalised text (see `normalizeChannelSearch`) and page size. Its own key,
+   * so a search never writes into the roster's pages and the roster never into a search's.
+   */
+  search: (query: string, limit: number) =>
+    ["channels", "search", { query, limit }] as const,
   /** Every channel read by id, to refetch them together. */
   details: () => ["channels", "detail"] as const,
   detail: (channelId: string) => ["channels", "detail", channelId] as const,
@@ -126,6 +147,70 @@ export function channelListQueryOptions() {
         : "";
       const response = await client(`/api/channels${suffix}`, {
         fallback: "Couldn't load your conversations.",
+      });
+      return (await response.json()) as ChannelPage;
+    },
+    getNextPageParam: (page: ChannelPage) => page.nextCursor ?? undefined,
+    select: (data): ChannelSummary[] =>
+      data.pages.flatMap((page) => page.channels),
+  });
+}
+
+/** How many results one page of a search asks for: the server's own default. */
+export const CHANNEL_SEARCH_PAGE = 20;
+
+/** The fewest characters, in code points, that are sent to the server as a search. */
+export const CHANNEL_SEARCH_MIN_CODE_POINTS = 2;
+
+/**
+ * What the server compares a search as: trimmed, and composed so an accent typed as two code points
+ * is the same search as one typed as one. The server does this too; doing it here as well means two
+ * spellings of one search share a cache entry.
+ */
+export function normalizeChannelSearch(text: string): string {
+  return text.trim().normalize("NFC");
+}
+
+/** Whether this text is long enough to search history with. One character matches nearly everything. */
+export function isChannelSearchable(text: string): boolean {
+  return (
+    Array.from(normalizeChannelSearch(text)).length >=
+    CHANNEL_SEARCH_MIN_CODE_POINTS
+  );
+}
+
+/**
+ * Every conversation of this person's that matches `query`, searched by the server a page at a time.
+ *
+ * The server searches the roster's own text (name, summary, opening and latest message) across the
+ * person's whole history. It does not search inside every message of a transcript, which is why
+ * the sidebar says what it searches.
+ *
+ * Disabled until the text is searchable, so a caller can hold this with whatever is in the box. A
+ * request is abandoned through the query's signal once its key goes out of use, and a slower answer
+ * to an earlier search cannot land on a later one, because each search is its own cache entry.
+ * Pages are flattened like the roster's.
+ *
+ * Shared by the sidebar and the command menu.
+ */
+export function channelSearchInfiniteQueryOptions(
+  query: string,
+  limit: number = CHANNEL_SEARCH_PAGE,
+) {
+  const normalized = normalizeChannelSearch(query);
+  return infiniteQueryOptions({
+    queryKey: channelKeys.search(normalized, limit),
+    enabled: isChannelSearchable(normalized),
+    initialPageParam: "",
+    queryFn: async ({ pageParam, signal }): Promise<ChannelPage> => {
+      const params = new URLSearchParams({
+        q: normalized,
+        limit: String(limit),
+      });
+      if (pageParam) params.set("cursor", pageParam as string);
+      const response = await client(`/api/channels/search?${params}`, {
+        fallback: "Couldn't search your conversations.",
+        signal,
       });
       return (await response.json()) as ChannelPage;
     },

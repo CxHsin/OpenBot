@@ -2,6 +2,7 @@ import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { createAuditStore, recordAuditEvent } from "../../audit";
 import type { Database } from "../../db/client";
 import {
+  brokeredAccounts,
   brokeredConnections,
   credentials as credentialRows,
   mcpServers,
@@ -11,6 +12,7 @@ import {
   users,
   vendorNameOf,
 } from "../../db/schema";
+import { appsPage } from "../../edition";
 import { BROKERED_PROFILE, toolkitOfFor } from "../access";
 import {
   BrokerRefusalError,
@@ -19,12 +21,22 @@ import {
   isFieldScheme,
   type SchemeKind,
 } from "../broker";
+import { mightDestroy } from "../catalogue";
 import {
   asksForArguments,
   askAction as composioAskAction,
   VERSION_ARG,
 } from "../composio";
-import type { AccountRef } from "../shared-accounts";
+import {
+  sharedAccountOnly,
+  sharedAccountOnlySentence,
+} from "../deployment-clients";
+import { type AccountRef, filedUnderPerson } from "../shared-accounts";
+import {
+  type RemoteTokenSet,
+  registerRemoteClient,
+  serializeTokenSet,
+} from "../remote-oauth";
 import type { StoreContext } from "./context";
 import {
   attemptNamed,
@@ -108,7 +120,42 @@ export function connectionMethods(context: StoreContext) {
       const stored = await storedOAuthClient(serverId);
       if (stored) return stored;
 
-      const { entry } = await requireServer(serverId);
+      const { entry, row } = await requireServer(serverId);
+      /*
+       * A server added by URL that signs people in registers OpenBot at the registration endpoint its
+       * own authorization server published, through the MCP SDK (`remote-oauth.ts`). Its refusal is a
+       * sentence for the person pressing Connect, so it is thrown rather than flattened to null.
+       */
+      const remote = !entry && row.oauth ? row.oauth : null;
+      if (remote) {
+        if (!options.redirectUri) return null;
+        const remoteRedirect = options.redirectUri;
+        const outcome = await withOAuthClientLock(
+          serverId,
+          async (transaction) => {
+            const held = await heldOAuthClient(transaction, serverId);
+            if (held)
+              return { client: held, registered: false, replaced: false };
+            const registered = await registerRemoteClient({
+              config: remote,
+              redirectUri: remoteRedirect,
+              serverTitle: row.title,
+            });
+            const { replaced } = await writeOAuthClient(
+              { serverId, client: registered },
+              transaction,
+            );
+            return { client: registered, registered: true, replaced };
+          },
+        );
+        if (outcome?.registered) {
+          await recordClientRegistered(
+            { serverId, client: outcome.client, by },
+            outcome.replaced,
+          );
+        }
+        return outcome?.client ?? null;
+      }
       if (
         entry?.auth.kind !== "user-oauth" ||
         entry.auth.clientRegistration !== "dynamic" ||
@@ -189,6 +236,35 @@ export function connectionMethods(context: StoreContext) {
     },
 
     /** A failed Connect client lookup, attributed to the authenticated person and never to raw errors. */
+    /**
+     * Record one person's sign-in to a server added by URL: their whole token set, in the vault, as
+     * the catalogue's connections are recorded. See `remote-oauth.ts` for why it is a set.
+     */
+    async recordRemoteConnection(input: {
+      serverId: string;
+      userId: string;
+      tokens: RemoteTokenSet;
+      scope: string;
+    }): Promise<void> {
+      const { replaced } = await swapUserCredential({
+        serverId: input.serverId,
+        userId: input.userId,
+        refreshToken: serializeTokenSet(input.tokens),
+        scope: input.scope,
+      });
+      await recordAuditEvent(auditStore, {
+        eventType: "mcp.account_connected",
+        targetType: "mcp_server",
+        targetId: input.serverId,
+        payload: {
+          actor: input.userId,
+          server: input.serverId,
+          scope: input.scope,
+          reconnected: replaced,
+        },
+      });
+    },
+
     async recordOAuthClientReadFailure(input: {
       serverId: string;
       actorId: string;
@@ -856,6 +932,7 @@ export function connectionMethods(context: StoreContext) {
           inputSchema: mcpTools.inputSchema,
           effect: mcpTools.effect,
           destructive: mcpTools.destructive,
+          unclassified: mcpTools.unclassified,
           version: mcpTools.version,
         })
         .from(mcpTools)
@@ -866,7 +943,7 @@ export function connectionMethods(context: StoreContext) {
       // condition below has a version by definition, and building the answer here is what carries
       // that fact into the type instead of leaving the caller to re-check it.
       const safe = actions.flatMap((action) => {
-        if (action.effect !== "read" || action.destructive) return [];
+        if (action.effect !== "read" || mightDestroy(action)) return [];
         // Null in the column and blank in the data are the same nothing, and neither is a version
         // the transport can put on a call.
         const version = action.version?.trim();
@@ -1358,6 +1435,25 @@ export function connectionMethods(context: StoreContext) {
       scopes: string[];
       authProvider: string;
     }): Promise<{ claimed: boolean }> {
+      /*
+       * A FURTHER ACCOUNT OF THE PERSON'S, FILED UNDER A FURTHER ID OF THEIRS (Arcade; see
+       * `anotherArcadeAccount`). The connection row keeps naming the person's own id, which is what
+       * a call with no account picked runs as, and the further account is recorded beside it as one
+       * of their accounts at the app.
+       */
+      const own =
+        input.account.holder === "person"
+          ? (await personAccountOf(input.account.userId)).vendorUserId
+          : input.account.vendorUserId;
+      const further =
+        input.account.holder === "person" &&
+        input.account.vendorUserId !== own &&
+        filedUnderPerson(input.account.vendorUserId, own)
+          ? input.account
+          : null;
+      const recorded: AccountRef = further
+        ? { ...further, vendorUserId: own }
+        : input.account;
       return await database.transaction(async (transaction) => {
         /*
          * ONE STATEMENT, AND THE FIRST ONE. `completed_at` is truncated to milliseconds for the
@@ -1382,7 +1478,7 @@ export function connectionMethods(context: StoreContext) {
         const [existing] = await transaction
           .select({ app: brokeredConnections.app })
           .from(brokeredConnections)
-          .where(accountRow(input.toolkit, input.account));
+          .where(accountRow(input.toolkit, recorded));
 
         const verifiedAt = new Date();
         const set = {
@@ -1422,7 +1518,7 @@ export function connectionMethods(context: StoreContext) {
             holder: input.account.holder,
             userId:
               input.account.holder === "person" ? input.account.userId : null,
-            vendorUserId: input.account.vendorUserId,
+            vendorUserId: recorded.vendorUserId,
             connectedBy,
             ...set,
           })
@@ -1444,11 +1540,13 @@ export function connectionMethods(context: StoreContext) {
                   // that refusal is how the card knows the Connect it offered has happened (see
                   // `AppAccess.connectedAt`). Left at the first consent, the card went on offering
                   // Reconnect over an account that now allowed the action.
-                  set: {
-                    ...set,
-                    vendorUserId: input.account.vendorUserId,
-                    connectedAt: verifiedAt,
-                  },
+                  set: further
+                    ? set
+                    : {
+                        ...set,
+                        vendorUserId: recorded.vendorUserId,
+                        connectedAt: verifiedAt,
+                      },
                 }
               : {
                   target: [
@@ -1464,6 +1562,19 @@ export function connectionMethods(context: StoreContext) {
                   },
                 },
           );
+
+        if (further) {
+          await transaction
+            .insert(brokeredAccounts)
+            .values({
+              provider: brokerProvider,
+              app: input.toolkit,
+              userId: further.userId,
+              vendorUserId: further.vendorUserId,
+              accountId: "",
+            })
+            .onConflictDoNothing();
+        }
 
         await recordAuditEvent(
           createAuditStore(transaction as unknown as Database),
@@ -1826,7 +1937,7 @@ export function connectionMethods(context: StoreContext) {
           outcome: "unreachable",
           probe: null,
           attempted: candidate.name,
-          sentence: `This deployment brokers its apps through ${BROKERED_PROFILE[brokerProvider].vendor}, and the only connection check this deployment knows how to make is Composio's. Nothing was asked about this connection, so nothing is recorded about it.`,
+          sentence: `OpenBot can't check this kind of connection yet. Nothing was asked about it, so nothing is recorded about it.`,
         };
       }
 
@@ -2333,7 +2444,20 @@ export function connectionMethods(context: StoreContext) {
       const authScheme = await brokeredAppScheme(input.toolkit);
       if (!isFieldScheme(authScheme)) {
         throw new BrokerRefusalError(
-          `${input.toolkit} is not an app this deployment connects with values somebody types, so nothing was sent. Open the app on the Plugins page and connect it the way it asks for; if it is not listed there at all, an administrator has to enable it first.`,
+          `${input.toolkit} is not an app this deployment connects with values somebody types, so nothing was sent. Open the app on the ${appsPage()} page and connect it the way it asks for; if it is not listed there at all, an administrator has to enable it first.`,
+        );
+      }
+
+      /*
+       * AND A PERSON IS NEVER CONNECTED ON THE DEPLOYMENT'S OWN CLIENT. The connect route refuses
+       * this before the form is drawn; it is asked again here, before the values travel, because
+       * this method is callable without that route and what it would make is the organization's
+       * access filed as one person's account (see `sharedAccountOnly`).
+       */
+      if (input.account.holder === "person" && sharedAccountOnly(authScheme)) {
+        throw new PluginRefusedError(
+          sharedAccountOnlySentence(input.toolkit),
+          null,
         );
       }
 
@@ -2512,7 +2636,7 @@ export function connectionMethods(context: StoreContext) {
          * presses that end it either way.
          */
         throw new PluginRefusedError(
-          `${input.toolkit} was connected, and the check this deployment then ran against it did not come back clean: ${probed.sentence} That may be the key, and it may be the app — what came back does not say which — so the account is left standing and recorded as unchecked. Re-check it on the Plugins page once, and if it still will not answer, disconnect it and connect it again with a fresh key.`,
+          `${input.toolkit} was connected, and the check this deployment then ran against it did not come back clean: ${probed.sentence} That may be the key, and it may be the app — what came back does not say which — so the account is left standing and recorded as unchecked. Re-check it on the ${appsPage()} page once, and if it still will not answer, disconnect it and connect it again with a fresh key.`,
           null,
         );
       }
@@ -2736,7 +2860,7 @@ export function connectionMethods(context: StoreContext) {
       >;
       if ((await brokeredAppKind(input.toolkit)) !== "key") {
         throw new PluginRefusedError(
-          `${input.toolkit} is not an app this deployment holds a key for, so there is nothing here to re-check. It was connected at ${input.toolkit}'s own sign-in screen, and if it has stopped working, disconnecting it on the Plugins page and connecting it again is what fixes it.`,
+          `${input.toolkit} is not an app this deployment holds a key for, so there is nothing here to re-check. It was connected at ${input.toolkit}'s own sign-in screen, and if it has stopped working, disconnecting it on the ${appsPage()} page and connecting it again is what fixes it.`,
           null,
         );
       }
@@ -2752,7 +2876,7 @@ export function connectionMethods(context: StoreContext) {
 
       if (!held) {
         throw new PluginRefusedError(
-          `You have no connection to ${input.toolkit} here, so there is nothing to re-check. Connect it on the Plugins page and it will be checked as it is made.`,
+          `You have no connection to ${input.toolkit} here, so there is nothing to re-check. Connect it on the ${appsPage()} page and it will be checked as it is made.`,
           null,
         );
       }
@@ -2786,7 +2910,7 @@ export function connectionMethods(context: StoreContext) {
        */
       if (probed.outcome === "unreachable") {
         throw new PluginRefusedError(
-          `${input.toolkit} could not be checked just now: ${probed.sentence} Nothing here changed — your connection is still recorded exactly as the last check left it — so pressing Re-check again when ${BROKERED_PROFILE[brokerProvider].vendor} is answering is the whole of the retry.`,
+          `${input.toolkit} couldn't be checked just now: ${probed.sentence} Nothing changed, and your connection still shows the last check. Press Re-check again in a moment.`,
           null,
         );
       }
@@ -2853,7 +2977,7 @@ export function connectionMethods(context: StoreContext) {
        */
       if (!wrote) {
         throw new PluginRefusedError(
-          `Your connection to ${input.toolkit} was disconnected while this check was still running, so nothing was recorded about it: what the check found is about an account you no longer have here. Connect ${input.toolkit} again on the Plugins page if that was not what you meant.`,
+          `Your connection to ${input.toolkit} was disconnected while this check was still running, so nothing was recorded about it: what the check found is about an account you no longer have here. Connect ${input.toolkit} again on the ${appsPage()} page if that was not what you meant.`,
           null,
         );
       }
@@ -3086,6 +3210,49 @@ export function connectionMethods(context: StoreContext) {
         account: input.account,
         toolkit: input.toolkit,
       });
+
+      /*
+       * AND EVERY FURTHER ACCOUNT OF THE PERSON'S AT THE APP, which a broker that keeps one account
+       * per user id holds under a further id of theirs (Arcade; see `anotherArcadeAccount`). The
+       * sweep above reaches only the person's own id. Then the account rows go: the connection they
+       * stood behind is ending.
+       */
+      if (input.account.holder === "person") {
+        const person = input.account;
+        const further = await database
+          .select({ vendorUserId: brokeredAccounts.vendorUserId })
+          .from(brokeredAccounts)
+          .where(
+            and(
+              eq(brokeredAccounts.provider, brokerProvider),
+              eq(brokeredAccounts.app, input.toolkit),
+              eq(brokeredAccounts.userId, person.userId),
+            ),
+          );
+        for (const vendorUserId of new Set(
+          further
+            .map((row) => row.vendorUserId)
+            .filter(
+              (id) =>
+                id !== person.vendorUserId &&
+                filedUnderPerson(id, person.vendorUserId),
+            ),
+        )) {
+          await broker.revoke({
+            account: { ...person, vendorUserId },
+            toolkit: input.toolkit,
+          });
+        }
+        await database
+          .delete(brokeredAccounts)
+          .where(
+            and(
+              eq(brokeredAccounts.provider, brokerProvider),
+              eq(brokeredAccounts.app, input.toolkit),
+              eq(brokeredAccounts.userId, person.userId),
+            ),
+          );
+      }
 
       const asked = claim(ended);
 

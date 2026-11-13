@@ -1,5 +1,6 @@
 import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { recordAuditEvent } from "../../audit";
+import { encryptSecret } from "../../credentials";
 import {
   databaseComplaint,
   isQueryFailure,
@@ -33,14 +34,17 @@ import {
   labelledRead,
   resolveServerUrl,
   serverCredentialKind,
+  summaryFor,
   tokenHeaderFor,
 } from "../catalogue";
+import { sharedAccountOnly } from "../deployment-clients";
 import type { ListedTool } from "../mcp";
 import {
   type AccountMode,
   type AccountRef,
   asAccountRef,
 } from "../shared-accounts";
+import { authOf, type RemoteOAuthConfig } from "../remote-oauth";
 import { transportFor } from "../transport";
 import type { StoreContext } from "./context";
 import {
@@ -50,8 +54,10 @@ import {
   CustomServerRefusedError,
   DEPLOYMENT_ACTOR,
   effectiveUrl,
+  initiatedBy,
   isDeploymentFault,
   iso,
+  LISTING_REVISION,
   MEMORY_TOOLS_SERVER,
   PluginInvariantError,
   type ServerAddress,
@@ -69,6 +75,7 @@ export function serverMethods(context: StoreContext) {
     database,
     auditStore,
     credentials,
+    encryptionKey,
     broker,
     mcpGrantsForServers,
     accountRefFor,
@@ -211,6 +218,8 @@ export function serverMethods(context: StoreContext) {
         eventType: "configuration.changed",
         targetType: "mcp_server",
         targetId: resolved.entry.key,
+        // OpenBot adds Routines at its first start, and the personal edition's web search.
+        ...initiatedBy(input.by),
         payload: {
           actor: input.by,
           change: "mcp_server_added",
@@ -226,6 +235,41 @@ export function serverMethods(context: StoreContext) {
       const added = servers.find((server) => server.id === resolved.entry.key);
       if (!added) throw new CatalogueEntryUnknownError(input.key);
       return added;
+    },
+
+    /**
+     * Keep the key a server added by URL is reached with, in the vault, as that server's own `mcp`
+     * credential, and answer its id for {@link addCustomServer} to point the row at.
+     *
+     * Minted here rather than through `POST /api/admin/credentials`, because the person adding a
+     * server from Connections is not always an admin. The credential is named for the server, which
+     * is the rule `requireCredentialOfKind` then holds the add to: it is spent at this server and
+     * nowhere else.
+     */
+    async storeServerKey(input: {
+      serverId: string;
+      token: string;
+    }): Promise<string> {
+      const key = {
+        kind: "mcp" as const,
+        provider: input.serverId,
+        keyId: `mcp-${input.serverId}`,
+      };
+      const value = {
+        ...key,
+        metadata: { server: input.serverId },
+        encryptedValue: await encryptSecret(encryptionKey, input.token.trim()),
+      };
+      return database.transaction(async (transaction) => {
+        const live = await credentials.findLiveByKey(key, transaction);
+        const stored = live
+          ? await credentials.rotate(
+              { ...value, previousCredentialId: live.id },
+              transaction,
+            )
+          : await credentials.create(value, transaction);
+        return stored.id;
+      });
     },
 
     /**
@@ -255,6 +299,11 @@ export function serverMethods(context: StoreContext) {
        * as the admin adding it, since there is no deployment credential to ask with.
        */
       actorId?: string;
+      /**
+       * How the server signs each person in, as `probeRemoteServer` discovered it from the server's
+       * own OAuth challenge. Absent keeps what the row already has; null says it signs nobody in.
+       */
+      oauth?: RemoteOAuthConfig | null;
     }): Promise<ServerRecord> {
       const refusal = customUrlRefusal(input.url);
       if (refusal) throw new CustomServerRefusedError(refusal);
@@ -294,10 +343,10 @@ export function serverMethods(context: StoreContext) {
        * whether or not this deployment brokers through it today, and a reservation spelled twice is
        * the one that gets added to once. Each refusal still names the id it refused.
        */
-      for (const [screen, { vendor }] of BROKERED_SCREEN_NAMES) {
+      for (const [screen] of BROKERED_SCREEN_NAMES) {
         if (input.id === screen) {
           throw new CustomServerRefusedError(
-            `${screen} is the name of this deployment's own ${vendor} screen, so a server added there could never be opened. Choose another.`,
+            `${screen} is the name of one of OpenBot's own screens, so a server added there could never be opened. Choose another.`,
           );
         }
       }
@@ -326,10 +375,10 @@ export function serverMethods(context: StoreContext) {
        * and a policy rule are written against, so a row shadowing another path's namespace inherits
        * rules that were written about something else.
        */
-      for (const { idPrefix, vendor } of BROKERED_ID_PREFIXES) {
+      for (const { idPrefix } of BROKERED_ID_PREFIXES) {
         if (input.id.startsWith(idPrefix)) {
           throw new CustomServerRefusedError(
-            `Names beginning ${idPrefix} belong to the ${vendor} apps this deployment enables, so ${input.id} is not a name a server added by URL can take. Choose another.`,
+            `Names beginning ${idPrefix} are kept for the apps people connect through OpenBot, so ${input.id} can't be used for a server added by URL. Choose another.`,
           );
         }
       }
@@ -409,6 +458,12 @@ export function serverMethods(context: StoreContext) {
       const entraScope =
         (namedScope === undefined ? existing?.entraScope : namedScope) ||
         undefined;
+      // A server reached on each person's own sign-in has no deployment token and no Entra scope.
+      if (input.oauth && (input.credentialId?.trim() || entraScope)) {
+        throw new CustomServerRefusedError(
+          "A server that signs each person in takes no token.",
+        );
+      }
       if (entraScope) {
         if (!options.entra) {
           throw new CustomServerRefusedError(
@@ -471,6 +526,7 @@ export function serverMethods(context: StoreContext) {
           provenance: "custom",
           credentialId: credentialId ?? null,
           entraScope: entraScope ?? null,
+          oauth: input.oauth ?? null,
           addedBy: input.by,
         })
         .onConflictDoUpdate({
@@ -512,6 +568,7 @@ export function serverMethods(context: StoreContext) {
             ...(credentialId ? { credentialId } : {}),
             // Kept when the caller names none, for the reason given where `entraScope` is decided.
             ...(namedScope !== undefined ? { entraScope: namedScope } : {}),
+            ...(input.oauth !== undefined ? { oauth: input.oauth } : {}),
             addedBy: input.by,
             updatedAt: new Date(),
           },
@@ -533,10 +590,20 @@ export function serverMethods(context: StoreContext) {
         },
       });
 
-      await this.refreshTools(
-        input.id,
-        entraScope ? (input.actorId ?? "") : undefined,
-      );
+      /*
+       * A server that signs each person in has nobody signed in yet, so there is nobody to ask what
+       * it offers as. Its tools are listed when the first person connects (`discoverToolsOnConnect`).
+       */
+      const [stored] = await database
+        .select({ oauth: mcpServers.oauth })
+        .from(mcpServers)
+        .where(eq(mcpServers.id, input.id));
+      if (!stored?.oauth) {
+        await this.refreshTools(
+          input.id,
+          entraScope ? (input.actorId ?? "") : undefined,
+        );
+      }
       const added = (await this.listServers()).find(
         (server) => server.id === input.id,
       );
@@ -599,7 +666,7 @@ export function serverMethods(context: StoreContext) {
       const rowId = `${profile.idPrefix}${input.slug}`;
       if (toolkitOfFor(brokerProvider, url) !== input.slug) {
         throw new CustomServerRefusedError(
-          `${input.slug} is not a name ${brokerProvider === "arcade" ? "an" : "a"} ${profile.vendor} app can have. An app is named in letters, numbers, underscores and hyphens, because that name is read back out of this row's url to decide which app a call is against.`,
+          `${input.slug} isn't a name an app can have. An app is named in letters, numbers, underscores and hyphens.`,
         );
       }
 
@@ -1897,6 +1964,8 @@ export function serverMethods(context: StoreContext) {
           // Cleared: the listing was stored. The names it left out are a warning — see above.
           lastError: null,
           skippedTools: skipped.length > 0 ? skipped : null,
+          // Recorded by this build's reading of a listing; see `relistOutdatedBrokeredApps`.
+          listingRevision: LISTING_REVISION,
           updatedAt: new Date(),
         })
         .where(eq(mcpServers.id, serverId));
@@ -1928,6 +1997,7 @@ export function serverMethods(context: StoreContext) {
           eventType: "configuration.changed",
           targetType: "mcp_server",
           targetId: serverId,
+          ...initiatedBy(auditActor),
           payload: {
             actor: auditActor,
             change: "grants_not_advertised",
@@ -1958,6 +2028,7 @@ export function serverMethods(context: StoreContext) {
           eventType: "configuration.changed",
           targetType: "mcp_server",
           targetId: serverId,
+          ...initiatedBy(auditActor),
           payload: {
             actor: auditActor,
             change: "unlisted_tools_advertised",
@@ -1972,6 +2043,147 @@ export function serverMethods(context: StoreContext) {
       // the listing instead reported a duplicate the vendor named twice as two actions the
       // deployment holds, when `mcp_tools` holds one row for it.
       return { tools: storable.length };
+    },
+
+    /**
+     * Ask a per-person app what it offers as the person who just connected it, when nothing is held.
+     *
+     * CRITERION. Connecting the first account to an app whose tools can only be listed as a person
+     * leaves its tools listed, and offered to Bots, without anybody pressing Refresh.
+     *
+     * REASON. The refresh that runs when such an app is added has nobody to ask as, so it records a
+     * refusal and stores no tools — the honest state, as {@link refreshTools} says, until somebody
+     * has connected. Connecting is that moment, and nothing used to act on it: the app read
+     * "Connected" while every Bot was told it held none of its tools, until somebody happened to
+     * press Refresh tools.
+     *
+     * ONLY WHEN NOTHING IS HELD. Refreshing replaces the tools every Bot is offered, which is an
+     * administrator's button. Filling an empty list takes nothing from anybody; replacing a full one
+     * on every member's connect would make each of them its author.
+     *
+     * Through `this`, so the personal edition's wrapper gives every Bot the tools exactly as a
+     * Refresh would.
+     */
+    /**
+     * Bring the saved tool list of every app whose tools are this deployment's own code (Routines,
+     * Drive) up to date with the code that is running. Answers the apps it refreshed.
+     *
+     * CRITERION. After an upgrade, a Bot is offered the names, descriptions and schemas of the build
+     * it runs on, not the build that added the app.
+     *
+     * REASON. A listing is saved when an app is added and replaced only by {@link refreshTools}, which
+     * runs when an app is added, when one with no tools is connected, and when an admin presses
+     * Refresh. For a vendor's app that is right: asking costs a request, and the vendor decides what
+     * it offers. For an app whose tools are this code, the saved list is a copy of an older build, so
+     * a release that renames a tool or rewords a description never reached an existing install. The
+     * personal edition (OpenBot Desktop) has no Admin page to press Refresh on, and a team's admin
+     * has no reason to. Found when a goal's trigger tools kept telling the model about "the Bot's
+     * Responsibilities page" after the page and the code both said Goals.
+     *
+     * ONLY WHAT CHANGED, compared row by row, so an ordinary start writes nothing and leaves no trail.
+     * Refreshed through `this`, as a Refresh would be: grants are keyed by name and are not touched,
+     * an app turned off is not here to refresh, and the personal edition's wrapper gives every Bot a
+     * tool that is new. A failure is a warning, never a failed start: the saved list keeps working,
+     * and the next start tries again.
+     */
+    async refreshOwnListings(): Promise<string[]> {
+      const refreshed: string[] = [];
+      const rows = await database
+        .select({ id: mcpServers.id })
+        .from(mcpServers)
+        .orderBy(asc(mcpServers.id));
+      for (const { id } of rows) {
+        const kind = catalogueEntry(id)?.transport;
+        if (!kind || !transportFor(kind).listIsThisCode) continue;
+        try {
+          const { row, entry } = await requireServer(id);
+          const listed = await transportFor(kind).listTools({
+            url: effectiveUrl(row, entry),
+            tokenHeader: tokenHeaderFor(entry),
+          });
+          const held = await database
+            .select()
+            .from(mcpTools)
+            .where(eq(mcpTools.serverId, id));
+          if (sameListing(held, storableTools(id, listed).rows)) continue;
+          await this.refreshTools(id);
+          refreshed.push(id);
+        } catch (error) {
+          console.warn(
+            JSON.stringify({
+              type: "own-app-tools-refresh-failed",
+              serverId: id,
+              error: reasonWithoutStatement(error),
+            }),
+          );
+        }
+      }
+      return refreshed;
+    },
+
+    /**
+     * Lists again, once, every app of the active broker whose tools were recorded by an older reading
+     * of a listing (`mcpServers.listingRevision` behind {@link LISTING_REVISION}).
+     *
+     * CRITERION. After an upgrade, an app's actions are recorded as a fresh install would record
+     * them, without anybody pressing Refresh tools.
+     *
+     * REASON. #1177 records an action its broker says nothing about as `unclassified`, where Arcade's
+     * had been recorded as `destructive`, which always asks. A row listed before it can't be told
+     * from an action Arcade did flag (both are a destructive write), so it is not rewritten in a
+     * migration: the app is asked again. A flagged action comes back destructive and still asks, a
+     * delete or archive name still asks by its name, and only the silence stops asking.
+     *
+     * Only the active broker's apps: a broker lists with the deployment's own key, so nobody's
+     * account is needed, and an app of a broker this deployment no longer uses can't be asked. A
+     * refresh that fails leaves the revision behind, so the next attempt tries again; what is stored
+     * keeps working, and asks as before, until then. Answers the apps still behind.
+     */
+    async relistOutdatedBrokeredApps(): Promise<string[]> {
+      if (!broker) return [];
+      const outdated = await database
+        .select({ id: mcpServers.id })
+        .from(mcpServers)
+        .where(
+          and(
+            eq(mcpServers.provenance, brokerProvider),
+            sql`${mcpServers.listingRevision} < ${LISTING_REVISION}`,
+          ),
+        )
+        .orderBy(asc(mcpServers.id));
+      const behind: string[] = [];
+      for (const { id } of outdated) {
+        try {
+          await this.refreshTools(id);
+        } catch (error) {
+          console.warn(
+            JSON.stringify({
+              type: "brokered-app-relist-failed",
+              serverId: id,
+              error: reasonWithoutStatement(error),
+            }),
+          );
+        }
+        const [after] = await database
+          .select({ revision: mcpServers.listingRevision })
+          .from(mcpServers)
+          .where(eq(mcpServers.id, id));
+        if (after && after.revision < LISTING_REVISION) behind.push(id);
+      }
+      return behind;
+    },
+
+    async discoverToolsOnConnect(
+      serverId: string,
+      userId: string,
+    ): Promise<{ tools: number } | null> {
+      const [held] = await database
+        .select({ name: mcpTools.name })
+        .from(mcpTools)
+        .where(eq(mcpTools.serverId, serverId))
+        .limit(1);
+      if (held) return null;
+      return this.refreshTools(serverId, userId);
     },
 
     async listServers(): Promise<ServerRecord[]> {
@@ -2072,7 +2284,7 @@ export function serverMethods(context: StoreContext) {
           logo: row.logo,
           vendor: row.vendor,
           url: effectiveUrl(row, entry),
-          summary: entry?.summary ?? "",
+          summary: entry ? summaryFor(entry) : "",
           docsUrl: entry?.docsUrl ?? "",
           provenance: row.provenance,
           hasCredential: row.credentialId !== null,
@@ -2080,9 +2292,14 @@ export function serverMethods(context: StoreContext) {
           lastError: row.lastError,
           skippedTools: row.skippedTools ?? [],
           addedBy: row.addedBy,
-          dynamicClient:
-            entry?.auth.kind === "user-oauth" &&
-            entry.auth.clientRegistration === "dynamic",
+          dynamicClient: (() => {
+            const auth = authOf(entry, row);
+            return (
+              auth?.kind === "user-oauth" &&
+              auth.clientRegistration === "dynamic"
+            );
+          })(),
+          signIn: !entry && row.oauth !== null,
           // The app's, for a row whose url names one; this row's own column for everything else,
           // which is a null on every server that is not brokered. See the read above.
           authScheme: toolkit
@@ -2101,6 +2318,9 @@ export function serverMethods(context: StoreContext) {
             toolkit !== null &&
             brokeredApps.get(row.url)?.accountMode === "shared" &&
             deploymentHeld.has(toolkit),
+          sharedOnly:
+            toolkit !== null &&
+            sharedAccountOnly(brokeredApps.get(row.url)?.authScheme ?? null),
           ownCredential,
           ownerGrants: ownerGrantsOf({
             provider: toolkit ? brokerProvider : entry ? "catalogue" : "custom",
@@ -2110,7 +2330,7 @@ export function serverMethods(context: StoreContext) {
             accountMode: toolkit
               ? (brokeredApps.get(row.url)?.accountMode ?? null)
               : row.accountMode,
-            catalogueAuth: entry?.auth ?? null,
+            catalogueAuth: authOf(entry, row),
             ownerGrants: row.ownerGrants,
           }),
           ownerGrantsChosen: row.ownerGrants,
@@ -2215,6 +2435,23 @@ export function serverMethods(context: StoreContext) {
     },
 
     /**
+     * How a server added by URL signs each person in, or null for any other server: one the
+     * catalogue describes, one reached on its own key, or no server at all. Read by the connect
+     * route and the OAuth callback, which take the endpoints from here and never from a request.
+     */
+    async remoteSignIn(
+      serverId: string,
+    ): Promise<{ title: string; config: RemoteOAuthConfig } | null> {
+      if (catalogueEntry(serverId)) return null;
+      const [row] = await database
+        .select({ title: mcpServers.title, oauth: mcpServers.oauth })
+        .from(mcpServers)
+        .where(eq(mcpServers.id, serverId))
+        .limit(1);
+      return row?.oauth ? { title: row.title, config: row.oauth } : null;
+    },
+
+    /**
      * Where every added server is, for the one caller whose question is about the whole set.
      *
      * A SECOND READ RATHER THAN {@link serverAddress} IN A LOOP, and rather than one method serving
@@ -2315,4 +2552,43 @@ export function serverMethods(context: StoreContext) {
         .where(eq(mcpServers.id, app?.id ?? serverId));
     },
   };
+}
+
+/**
+ * Whether what is saved for an app is what its listing would save now: the same names, and for each
+ * the same words, schema and classification. Schemas are compared with their keys sorted, because
+ * PostgreSQL's `jsonb` keeps keys in an order of its own and gives them back in that order.
+ */
+function sameListing(
+  held: (typeof mcpTools.$inferSelect)[],
+  wanted: StorableTool[],
+): boolean {
+  if (held.length !== wanted.length) return false;
+  const saved = new Map(held.map((tool) => [tool.name, tool]));
+  return wanted.every((tool) => {
+    const was = saved.get(tool.name);
+    return (
+      was !== undefined &&
+      was.vendorName === tool.vendorName &&
+      was.description === tool.description &&
+      sortedJson(was.inputSchema) === sortedJson(tool.inputSchema) &&
+      was.effect === tool.effect &&
+      was.destructive === tool.destructive &&
+      was.unclassified === tool.unclassified &&
+      was.declaredRead === tool.declaredRead &&
+      was.version === tool.version
+    );
+  });
+}
+
+function sortedJson(value: unknown): string {
+  return JSON.stringify(value, (_key, inner: unknown) =>
+    inner && typeof inner === "object" && !Array.isArray(inner)
+      ? Object.fromEntries(
+          Object.entries(inner).sort(([left], [right]) =>
+            left < right ? -1 : left > right ? 1 : 0,
+          ),
+        )
+      : inner,
+  );
 }
