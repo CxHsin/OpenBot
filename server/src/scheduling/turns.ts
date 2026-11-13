@@ -40,31 +40,38 @@ export function createTurnScheduling(deps: {
   const people = new Map<string, Promise<void>>();
   const keyOf = (input: Pick<Input, "ownerUserId" | "threadId">) =>
     JSON.stringify([input.ownerUserId, input.threadId]);
+  async function conversation(input: Input, run: TurnRunner, preempt: boolean) {
+    const key = keyOf(input);
+    const previous = people.get(key);
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    people.set(key, waiting);
+    try {
+      await previous;
+      const background = backgrounds.get(key);
+      if (background) {
+        if (preempt) background.yieldRequested = true;
+        await background.released;
+      }
+      input.signal?.throwIfAborted();
+      return await run(input);
+    } finally {
+      release();
+      if (people.get(key) === waiting) people.delete(key);
+    }
+  }
   return {
     personIsActive(input: Pick<Input, "ownerUserId" | "threadId">) {
       return people.has(keyOf(input));
     },
     async person(input: Input, run: TurnRunner) {
-      const key = keyOf(input);
-      const previous = people.get(key);
-      let release!: () => void;
-      const waiting = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      people.set(key, waiting);
-      try {
-        await previous;
-        const background = backgrounds.get(key);
-        if (background) {
-          background.yieldRequested = true;
-          await background.released;
-        }
-        input.signal?.throwIfAborted();
-        return await run(input);
-      } finally {
-        release();
-        if (people.get(key) === waiting) people.delete(key);
-      }
+      return conversation(input, run, true);
+    },
+    /** Shares the local conversation lane without acquiring the caller's still-held thread lock. */
+    async responsibility(input: Input, run: TurnRunner) {
+      return conversation(input, run, false);
     },
     async routine(input: Input, routineRunId: string, run: TurnRunner) {
       const key = keyOf(input);

@@ -28,7 +28,7 @@ import { BOT_PAUSED_REASON, isBotPaused } from "../agents/lifecycle";
 import type { AgentActor } from "../agents/profile-types";
 import type { ChannelStore } from "../channels/routes";
 import { RoutinePreemptedError } from "../scheduling/turns";
-import type { RoutineStore } from "./store";
+import type { RoutineRunContext, RoutineStore } from "./store";
 
 export type RoutineRunner = {
   run(
@@ -69,6 +69,10 @@ export function createRoutineRunner(options: {
   routineStore: RoutineStore;
   channelStore: ChannelStore;
   runTurn: TurnRunner;
+  dispatchResponsibility?: (
+    context: RoutineRunContext,
+    routineRunId: string,
+  ) => Promise<boolean>;
   aroundTurn?(
     routineRunId: string,
     input: Parameters<TurnRunner>[0],
@@ -89,6 +93,7 @@ export function createRoutineRunner(options: {
      * say to anybody. The firing is dropped on the floor deliberately.
      */
     if (!context) return;
+    const firingContext = context;
     /*
      * PAUSED NEVER RUNS, checked here at the moment of running rather than only when the firing was
      * offered: a person who switched the routine off after the dispatch, or a Run now that raced a
@@ -172,6 +177,22 @@ export function createRoutineRunner(options: {
     async function fire(threadId: string): Promise<void> {
       let replyText: string;
       try {
+        if (firingContext.responsibilityId) {
+          if (!options.dispatchResponsibility)
+            throw new Error("Scheduled delegations are unavailable.");
+          const queued = await options.dispatchResponsibility(
+            firingContext,
+            routineRunId,
+          );
+          await routineStore.finishRun(
+            routineRunId,
+            queued ? "succeeded" : "skipped",
+            queued
+              ? undefined
+              : "the responsibility is inactive or unavailable",
+          );
+          return;
+        }
         const input = {
           ownerUserId,
           routineId,

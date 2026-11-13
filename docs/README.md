@@ -7,6 +7,7 @@
 - Understanding an important choice: [Decisions](decisions/README.md). ADRs explain why; current behavior lives in design/domain docs.
 - Choosing the next task: [Plans and specs](dev/plans/README.md).
 - Checking behavior: [Evals](../evals/README.md); logs remain outside docs.
+- Running the first sustained GitHub watch: [OpenBot observer](../examples/nailong/README.md).
 
 Each detailed fact has one authoritative home. Other documents summarize and link; add, merge or remove
 domain docs as the code evolves. The upstream references below remain applicable where this fork has not changed behavior.

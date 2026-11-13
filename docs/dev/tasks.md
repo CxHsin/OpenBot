@@ -21,6 +21,21 @@ P1 的 `scheduling/routine-work.ts` 使用已有会话历史续跑，并在已�
 
 ## 验证与待完成
 
+定时职责复用 routine clock、工作队列与 responsibility engine：routine 保存可选目标 ID，
+firing 直接提交 schedule 事件，真实 routine run 及其 owner/Bot/channel 关联用于验证目标。
+同一 routine run 的稳定事件键避免重复创建目标运行；时钟自身不生成模型轮次或通知。
+暂停 routine 只停止后续 firing，不取消已经入队的目标工作；暂停或完成职责会阻止其开始。
+目标缺失或状态不符时跳过，不退回普通 routine 指令。升级需应用迁移 0075。
+现场与回归证据见 [eval 015](../../evals/015-scheduled-responsibility.md)。
+
+持续检查通过 `finish_responsibility_check` 暂存进度与 notify；只有成功结算事务才写入职责
+progress 与 run.notify。失败或等待审批丢弃暂存值；若运行期间 progress 已变更，拒绝旧结果
+覆盖。notify=false 的成功运行保留结果，但跳过 channel activity 与 delivery；默认仍通知。
+notify=true 的检查在结算前先交给既有通知入口；入队抛错不推进游标。部分入队或入队后结算前
+崩溃仍有不确定窗口，不能视为外部投递与进度已经成为同一个事务。
+GitHub 上游与 fork 的采集方式见 [observer](../../examples/nailong/README.md)，验收见
+[eval 016](../../evals/016-upstream-observation.md)。
+
 现有测试入口：`server/tests/tasks-state.test.ts`、`tasks.integration.test.ts`、
 `work-queue.integration.test.ts`，以及 `server/src/scheduling/` 中的回归。
 数据库准备见 [local](local.md)。

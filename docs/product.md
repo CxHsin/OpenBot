@@ -45,4 +45,8 @@ nailong-bot 是类似 Grokbot、运行在用户自己电脑上的个人 agent，
 
 ## 待明确
 
-首批 source 与优先任务、默认检查频率和补查方式、通知门槛，以及不同行动的授权方式与默认边界。
+首个 source 已选定 GitHub 的 CopilotKit/openbot 与 CxHsin/OpenBot main，首轮检查最新一条提交，
+之后每日 Asia/Shanghai 09:00 从上次成功游标补查。关注可靠执行、权限审计、持久委托、消息交付
+与本机使用体验；无变化或没有值得关注的变化保持静默。只读分析，不自动提交、合并或推送。
+当前验收范围见 [eval 016](../evals/016-upstream-observation.md)。
+其他 source、后续优先任务与超出只读分析的行动边界，按真实需求另行确定。

@@ -108,6 +108,8 @@ export const responsibilityRuns = pgTable(
       .references(() => responsibilityEvents.id, { onDelete: "cascade" }),
     status: responsibilityRunStatus("status").notNull().default("queued"),
     replyText: text("reply_text"),
+    /** Quiet checks retain their result without posting activity or delivery. */
+    notify: boolean("notify").notNull().default(true),
     error: text("error"),
     waiting: jsonb("waiting").$type<HeadlessWaiting>(),
     continuation: jsonb("continuation").$type<ResponsibilityContinuation>(),

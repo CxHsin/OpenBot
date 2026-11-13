@@ -526,6 +526,20 @@
       "when": 1793655657340,
       "tag": "0074_single_user_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1794587930801,
+      "tag": "0075_routine_responsibility",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1794589039771,
+      "tag": "0076_responsibility_quiet",
+      "breakpoints": true
     }
   ]
 }

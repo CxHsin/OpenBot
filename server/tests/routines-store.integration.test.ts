@@ -15,6 +15,11 @@ import {
   routines,
   users,
 } from "../src/db/schema";
+import { workItems } from "../src/db/schema/work";
+import { callTool } from "../src/plugins/builtin-routines";
+import { useResponsibilityChatTools } from "../src/responsibilities/chat-tools";
+import { createScheduledResponsibilityDispatch } from "../src/responsibilities/scheduled";
+import { createResponsibilityStore } from "../src/responsibilities/store";
 import {
   createRoutineStore,
   MAX_ENABLED_ROUTINES,
@@ -108,6 +113,101 @@ async function setUp() {
   const channel = await createChannel(owner, [agentId]);
   return { owner, agentId, channel };
 }
+
+test("a conversation schedule persists its link and one firing produces one owned goal run", async () => {
+  const { owner, agentId, channel } = await setUp();
+  const goals = createResponsibilityStore(database, {
+    resolveTarget: async () => ({ threadId: channel.threadId }),
+  });
+  const goal = await goals.create(owner.id, {
+    agentId,
+    channelId: channel.id,
+    title: "Watch upstream",
+    instruction: "Analyze changes",
+    successCriteria: "A sourced report",
+    subscriptions: [],
+  });
+  const queued: string[] = [];
+  const engine = {
+    ingest: async (event: unknown) => {
+      const result = await goals.ingestEvent(event);
+      queued.push(...result.runIds);
+      return result;
+    },
+  };
+  useResponsibilityChatTools({
+    store: goals,
+    engine,
+    conversationFor: store.conversationFor,
+    scheduleRoutine: (input) => store.create(input),
+  });
+  try {
+    const result = await callTool(
+      { url: "builtin://routines", actorId: owner.id, botId: agentId },
+      "schedule_responsibility",
+      { id: goal.id, cron: DAILY, timezone: "Asia/Shanghai" },
+    );
+    expect(result.isError).toBe(false);
+    const { routineId } = JSON.parse(result.text);
+    const reloaded = await createRoutineStore(database).listFor(owner.id);
+    expect(reloaded.find((row) => row.id === routineId)?.responsibilityId).toBe(
+      goal.id,
+    );
+    const { runId } = await store.startManualRun(owner.id, routineId);
+    const context = await store.runContext(runId);
+    if (!context) throw new Error("Missing routine context");
+    expect(context.responsibilityId).toBe(goal.id);
+    const dispatch = createScheduledResponsibilityDispatch({
+      store: goals,
+      engine,
+    });
+    expect(await dispatch(context, runId)).toBe(true);
+    expect(await dispatch(context, runId)).toBe(true);
+    expect(new Set(queued).size).toBe(1);
+    expect(await goals.listRuns(owner.id, goal.id)).toHaveLength(1);
+    const forged = await goals.ingestEvent({
+      ownerUserId: owner.id,
+      source: "schedule",
+      responsibilityId: goal.id,
+      externalId: "routine:forged",
+      type: "routine.fired",
+      payload: { routineRunId: "forged" },
+    });
+    expect(forged.runIds).toHaveLength(0);
+    const foreignBot = await createAgent(owner, "Other Bot");
+    const denied = await callTool(
+      { url: "builtin://routines", actorId: owner.id, botId: foreignBot },
+      "schedule_responsibility",
+      { id: goal.id, cron: DAILY, timezone: "Asia/Shanghai" },
+    );
+    expect(denied.isError).toBe(true);
+    await expect(
+      store.create({
+        ownerUserId: owner.id,
+        agentId: foreignBot,
+        channelId: channel.id,
+        responsibilityId: goal.id,
+        instruction: "Run",
+        cron: DAILY,
+      }),
+    ).rejects.toBeInstanceOf(RoutineRefusedError);
+    await goals.transition(owner.id, goal.id, "paused");
+    expect(await dispatch(context, "new-firing")).toBe(false);
+    expect(await goals.listRuns(owner.id, goal.id)).toHaveLength(1);
+    await goals.transition(owner.id, goal.id, "completed");
+    expect(await dispatch(context, "completed-firing")).toBe(false);
+    expect(await dispatch({ ...context, agentId: "foreign-bot" }, runId)).toBe(
+      false,
+    );
+    expect(
+      await dispatch({ ...context, ownerUserId: "foreign-owner" }, runId),
+    ).toBe(false);
+  } finally {
+    useResponsibilityChatTools(null);
+    for (const key of new Set(queued))
+      await database.delete(workItems).where(eq(workItems.key, key));
+  }
+});
 
 async function waitForDatabaseLock(name: string) {
   const deadline = Date.now() + 5000;

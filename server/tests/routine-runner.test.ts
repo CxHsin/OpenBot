@@ -69,6 +69,10 @@ function harness(options: {
   channel?: AgentChannel | null;
   failures?: number;
   runTurn?: TurnRunner;
+  dispatchResponsibility?: (
+    context: RoutineRunContext,
+    runId: string,
+  ) => Promise<boolean>;
   recordActivity?: () => Promise<void>;
   signalBusy?: () => Promise<void>;
 }) {
@@ -150,9 +154,57 @@ function harness(options: {
 
   return {
     recorded,
-    runner: createRoutineRunner({ routineStore, channelStore, runTurn }),
+    runner: createRoutineRunner({
+      routineStore,
+      channelStore,
+      runTurn,
+      dispatchResponsibility: options.dispatchResponsibility,
+    }),
   };
 }
+
+test("a linked routine queues its goal without a model turn or acknowledgement", async () => {
+  const calls: string[] = [];
+  const { runner, recorded } = harness({
+    context: { ...CONTEXT, responsibilityId: "goal" },
+    async dispatchResponsibility(context, runId) {
+      expect(context.ownerUserId).toBe(CONTEXT.ownerUserId);
+      expect(context.responsibilityId).toBe("goal");
+      calls.push(runId);
+      return true;
+    },
+  });
+  await runner.run(RUN_ID);
+  expect(calls).toEqual([RUN_ID]);
+  expect(recorded.turns).toHaveLength(0);
+  expect(recorded.activity).toHaveLength(0);
+  expect(recorded.finished).toEqual([
+    { runId: RUN_ID, status: "succeeded", error: undefined },
+  ]);
+});
+
+test("an unavailable linked target skips instead of executing the routine instruction", async () => {
+  const { runner, recorded } = harness({
+    context: { ...CONTEXT, responsibilityId: "removed-goal" },
+    dispatchResponsibility: async () => false,
+  });
+  await runner.run(RUN_ID);
+  expect(recorded.turns).toHaveLength(0);
+  expect(recorded.activity).toHaveLength(0);
+  expect(recorded.finished[0]?.status).toBe("skipped");
+});
+
+test("a paused linked routine never dispatches its goal", async () => {
+  const { runner, recorded } = harness({
+    context: { ...CONTEXT, responsibilityId: "goal", enabled: false },
+    dispatchResponsibility: async () => {
+      throw new Error("Must not dispatch");
+    },
+  });
+  await runner.run(RUN_ID);
+  expect(recorded.turns).toHaveLength(0);
+  expect(recorded.finished[0]?.status).toBe("skipped");
+});
 
 const throwingTurn: TurnRunner = async () => {
   throw new Error("the model refused");

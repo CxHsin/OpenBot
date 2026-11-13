@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import type { Database } from "../db/client";
+import { routineRuns, routines } from "../db/schema/coworker";
 import {
   responsibilities,
   responsibilityEvents,
@@ -266,8 +267,37 @@ export function createResponsibilityStore(
             ),
           )
           .for("update");
+        // A bound clock event may directly address its goal without a broad schedule subscription.
+        // Verify the firing in our tables; a payload naming somebody's goal is not authorization.
+        const scheduledRunId = event.payload.routineRunId;
+        const [scheduled] =
+          event.source === "schedule" &&
+          event.type === "routine.fired" &&
+          event.responsibilityId &&
+          typeof scheduledRunId === "string" &&
+          event.externalId === `routine:${scheduledRunId}`
+            ? await transaction
+                .select({
+                  goalId: routines.responsibilityId,
+                  agentId: routines.agentId,
+                  channelId: routines.channelId,
+                })
+                .from(routineRuns)
+                .innerJoin(routines, eq(routines.id, routineRuns.routineId))
+                .where(
+                  and(
+                    eq(routineRuns.id, scheduledRunId),
+                    eq(routines.ownerUserId, event.ownerUserId),
+                    eq(routines.responsibilityId, event.responsibilityId),
+                    eq(routines.enabled, true),
+                  ),
+                )
+            : [];
         const matching = candidates.filter(
           (goal) =>
+            (scheduled?.goalId === goal.id &&
+              scheduled.agentId === goal.agentId &&
+              scheduled.channelId === goal.channelId) ||
             (event.source === "manual" && event.responsibilityId === goal.id) ||
             (event.triggerId !== undefined &&
               event.responsibilityId === goal.id) ||
@@ -397,8 +427,11 @@ export function createResponsibilityStore(
           .from(responsibilityRuns)
           .where(eq(responsibilityRuns.id, runId));
         if (!reference) throw new ResponsibilityNotFoundError();
-        await transaction
-          .select({ id: responsibilities.id })
+        const [goal] = await transaction
+          .select({
+            id: responsibilities.id,
+            progress: responsibilities.progress,
+          })
           .from(responsibilities)
           .where(eq(responsibilities.id, reference.responsibilityId))
           .for("update");
@@ -411,6 +444,17 @@ export function createResponsibilityStore(
           throw new ResponsibilityRefusedError(
             "This responsibility run is no longer running.",
           );
+        if (outcome.status === "succeeded" && outcome.checkpoint) {
+          if (
+            !outcome.checkpoint.summary.trim() ||
+            outcome.checkpoint.summary.length > 6000
+          )
+            throw new ResponsibilityRefusedError("Invalid check progress.");
+          if (goal?.progress !== outcome.checkpoint.expectedProgress)
+            throw new ResponsibilityRefusedError(
+              "Responsibility progress changed during this check; its checkpoint was not saved.",
+            );
+        }
         const replyText =
           outcome.status === "succeeded"
             ? outcome.replyText.slice(0, 32_000)
@@ -420,6 +464,8 @@ export function createResponsibilityStore(
           .set({
             status: outcome.status,
             replyText,
+            notify:
+              outcome.status === "succeeded" ? outcome.notify !== false : true,
             error: "error" in outcome ? outcome.error : null,
             waiting: outcome.status === "waiting" ? outcome.waiting : null,
             continuation: null,
@@ -429,7 +475,13 @@ export function createResponsibilityStore(
         if (outcome.status === "succeeded")
           await transaction
             .update(responsibilities)
-            .set({ lastResult: replyText, updatedAt: new Date() })
+            .set({
+              lastResult: replyText,
+              updatedAt: new Date(),
+              ...(outcome.checkpoint
+                ? { progress: outcome.checkpoint.summary }
+                : {}),
+            })
             .where(eq(responsibilities.id, run.responsibilityId));
       });
     },

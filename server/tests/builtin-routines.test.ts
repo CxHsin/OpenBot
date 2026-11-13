@@ -133,7 +133,7 @@ describe("a list too long for one result", () => {
 });
 
 describe("the tool list", () => {
-  test("is the four routine tools and the five trigger tools, named exactly", async () => {
+  test("lists routines, triggers and conversation delegations", async () => {
     const tools = await listTools();
     expect(tools.map((tool) => tool.name)).toEqual([
       "create_routine",
@@ -145,6 +145,14 @@ describe("the tool list", () => {
       "pause_trigger",
       "resume_trigger",
       "delete_trigger",
+      "create_responsibility",
+      "list_responsibilities",
+      "update_responsibility",
+      "run_responsibility",
+      "pause_responsibility",
+      "resume_responsibility",
+      "complete_responsibility",
+      "schedule_responsibility",
     ]);
     for (const tool of tools) {
       expect(tool.description.length).toBeGreaterThan(0);
@@ -183,7 +191,7 @@ describe("the tool list", () => {
     // that refused without one would store zero tools and Routines would advertise nothing.
     useRoutineTools(null);
     const tools = await listTools();
-    expect(tools).toHaveLength(9);
+    expect(tools).toHaveLength(17);
   });
 });
 

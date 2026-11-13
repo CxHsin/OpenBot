@@ -4,9 +4,13 @@ import type { WorkQueue } from "../work/queue";
 import type { ResponsibilityRunContext, ResponsibilityStore } from "./types";
 
 export const RESPONSIBILITY_RUN_KIND = "responsibility.run";
+export type ResponsibilityTurnResult = {
+  replyText: string;
+  check?: { summary: string; notify: boolean };
+};
 export type RunResponsibilityTurn = (
   input: ResponsibilityRunContext & { signal: AbortSignal },
-) => Promise<{ replyText: string }>;
+) => Promise<ResponsibilityTurnResult>;
 export type ResponsibilityDispatchReport = {
   succeeded: string[];
   waiting: string[];
@@ -120,12 +124,31 @@ export function createResponsibilityEngine(options: {
             signal: controller.signal,
           });
           if (lostLease) throw lostLease;
+          // Checkpoints must not skip a report that never made it to the existing delivery outbox.
+          // Stable per-run notification keys make a partial offer safe to repeat within this run.
+          const replyBeforeCheckpoint =
+            result.check?.notify === true && !!onReply;
+          if (replyBeforeCheckpoint) await onReply?.(context, result.replyText);
+          if (lostLease) throw lostLease;
           await store.settleRun(runId, {
             status: "succeeded",
             replyText: result.replyText,
+            ...(result.check
+              ? {
+                  notify: result.check.notify,
+                  checkpoint: {
+                    summary: result.check.summary,
+                    expectedProgress: context.progress,
+                  },
+                }
+              : {}),
           });
           report.succeeded.push(runId);
-          if (onReply) {
+          if (
+            onReply &&
+            result.check?.notify !== false &&
+            !replyBeforeCheckpoint
+          ) {
             try {
               await onReply(context, result.replyText);
             } catch (error) {

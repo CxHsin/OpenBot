@@ -4,6 +4,7 @@ import {
   createTurnRunner,
   type IntelligenceLike,
   type RunnerLike,
+  type TurnRunner,
 } from "@openbot/toolkit/run-turn";
 import { z } from "zod";
 import { canUseComputer } from "../agents/computer-access";
@@ -23,6 +24,7 @@ import type { Database } from "../db/client";
 import type { DeliveryScope } from "../delivery/types";
 import { markUntrusted } from "../untrusted-content";
 import { createWorkQueue } from "../work/queue";
+import { createResponsibilityCheck } from "./check";
 import {
   createResponsibilityEngine,
   type ResponsibilityEngine,
@@ -51,6 +53,10 @@ export function createServerResponsibilityEngine(deps: {
   signInService: Parameters<typeof createHeadlessComputerTools>[0]["signIn"];
   copilotRuntime: Pick<ReturnType<typeof mountCopilotRuntime>, "learning">;
   channelStore: ChannelStore;
+  scheduleTurn: (
+    input: Parameters<TurnRunner>[0],
+    run: TurnRunner,
+  ) => ReturnType<TurnRunner>;
   notify: (
     scope: DeliveryScope,
     input: { id: string; kind: "reply"; text: string },
@@ -77,18 +83,22 @@ export function createServerResponsibilityEngine(deps: {
       store: responsibilityStore,
       queue: responsibilityQueue,
       runTurn: async (context) => {
+        const check = createResponsibilityCheck(context.responsibilityId);
         const initiator: AuditInitiator = {
           kind: "responsibility",
           id: context.responsibilityId,
         };
-        const tools = responsibilityTools({
-          store: responsibilityStore,
-          engine: responsibilityEngine,
-          ownerUserId: context.ownerUserId,
-          agentId: context.agentId,
-          channelId: context.channelId,
-          responsibilityRunId: context.runId,
-        });
+        const tools = [
+          ...responsibilityTools({
+            store: responsibilityStore,
+            engine: responsibilityEngine,
+            ownerUserId: context.ownerUserId,
+            agentId: context.agentId,
+            channelId: context.channelId,
+            responsibilityRunId: context.runId,
+          }),
+          check.tool,
+        ];
         const runner = createTurnRunner({
           admission: serverTurnAdmission,
           intelligence: routineIntelligence,
@@ -140,34 +150,41 @@ export function createServerResponsibilityEngine(deps: {
         const toolResult = saved
           ? parseApprovalResult(saved.response)
           : undefined;
-        return runner({
-          ownerUserId: context.ownerUserId,
-          routineId: context.responsibilityId,
-          agentId: context.agentId,
-          threadId: context.threadId,
-          initiator,
-          signal: context.signal,
-          ...(snapshot && toolResult
-            ? {
-                continuation: {
-                  snapshot,
-                  result: toolResult,
-                  messageId: `responsibility-result:${context.runId}:${snapshot.toolCallId}`,
-                },
-              }
-            : {}),
-          instruction: buildResponsibilityTurn({
-            instruction: context.instruction,
-            successCriteria: context.successCriteria,
-            progress: context.progress,
-            trigger: context.event,
-            eventData: markUntrusted(
-              JSON.stringify(context.event.payload),
-              `${context.event.source} event`,
-            ),
-            responsibilityId: context.responsibilityId,
-          }),
-        });
+        const result = await deps.scheduleTurn(
+          {
+            ownerUserId: context.ownerUserId,
+            routineId: context.responsibilityId,
+            agentId: context.agentId,
+            threadId: context.threadId,
+            initiator,
+            signal: context.signal,
+            ...(snapshot && toolResult
+              ? {
+                  continuation: {
+                    snapshot,
+                    result: toolResult,
+                    messageId: `responsibility-result:${context.runId}:${snapshot.toolCallId}`,
+                  },
+                }
+              : {}),
+            instruction: buildResponsibilityTurn({
+              instruction: context.instruction,
+              successCriteria: context.successCriteria,
+              progress: context.progress,
+              trigger: context.event,
+              eventData: markUntrusted(
+                JSON.stringify(context.event.payload),
+                `${context.event.source} event`,
+              ),
+              responsibilityId: context.responsibilityId,
+            }),
+          },
+          runner,
+        );
+        return {
+          ...result,
+          ...(check.result() ? { check: check.result() } : {}),
+        };
       },
       onReply: async (context, text) => {
         await channelStore.recordActivity(

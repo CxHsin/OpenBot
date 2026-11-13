@@ -8,6 +8,8 @@ import {
   responsibilityRuns,
 } from "../src/db/schema/responsibilities";
 import { workItems } from "../src/db/schema/work";
+import { callTool } from "../src/plugins/builtin-routines";
+import { useResponsibilityChatTools } from "../src/responsibilities/chat-tools";
 import { createResponsibilityStore } from "../src/responsibilities/store";
 import {
   ResponsibilityNotFoundError,
@@ -83,6 +85,44 @@ async function event(id: string, externalId = randomUUID()) {
   return result;
 }
 
+test("successful quiet checks atomically retain progress and notification choice", async () => {
+  const value = await goal();
+  const { runIds } = await event(value.id);
+  const runId = runIds[0];
+  if (!runId) throw new Error("Missing run");
+  await store.beginRun(runId);
+  await store.settleRun(runId, {
+    status: "succeeded",
+    replyText: "Verified unchanged.",
+    notify: false,
+    checkpoint: { summary: "cursor: verified-tip", expectedProgress: "" },
+  });
+  expect((await store.get(ownerId, value.id)).progress).toBe(
+    "cursor: verified-tip",
+  );
+  const [run] = await store.listRuns(ownerId, value.id);
+  expect(run?.notify).toBe(false);
+  expect(run?.replyText).toBe("Verified unchanged.");
+  const next = await event(value.id);
+  const nextId = next.runIds[0];
+  if (!nextId) throw new Error("Missing next run");
+  await store.beginRun(nextId);
+  await expect(
+    store.settleRun(nextId, {
+      status: "succeeded",
+      replyText: "Stale result",
+      checkpoint: { summary: "cursor: stale", expectedProgress: "" },
+    }),
+  ).rejects.toThrow("progress changed");
+  expect((await store.get(ownerId, value.id)).progress).toBe(
+    "cursor: verified-tip",
+  );
+  await store.settleRun(nextId, { status: "failed", error: "stale check" });
+  expect((await store.get(ownerId, value.id)).progress).toBe(
+    "cursor: verified-tip",
+  );
+});
+
 test("owned lifecycle survives reads and rejects another owner", async () => {
   const value = await goal();
   await expect(store.get(strangerId, value.id)).rejects.toBeInstanceOf(
@@ -104,6 +144,112 @@ test("owned lifecycle survives reads and rejects another owner", async () => {
   await expect(
     store.transition(ownerId, value.id, "active"),
   ).rejects.toBeInstanceOf(ResponsibilityRefusedError);
+});
+
+test("conversation tools persist delegation identity, lifecycle and paused dispatch", async () => {
+  useResponsibilityChatTools({
+    store,
+    engine: { ingest: (input) => store.ingestEvent(input) },
+    async conversationFor(owner, bot, requested) {
+      if (
+        owner !== ownerId ||
+        bot !== botId ||
+        (requested && requested !== channelId)
+      )
+        throw new ResponsibilityRefusedError("No shared channel.");
+      return channelId;
+    },
+  });
+  const connection = { url: "builtin://routines", actorId: ownerId, botId };
+  try {
+    const created = await callTool(connection, "create_responsibility", {
+      title: "Track upstream",
+      instruction: "Analyze new commits",
+      successCriteria: "Deliver sourced recommendations",
+      channelId: "",
+    });
+    expect(created.isError).toBe(false);
+    expect(created.text).toContain("no schedule of its own");
+    const saved = (await store.list(ownerId)).find(
+      (row) => row.title === "Track upstream",
+    );
+    if (!saved) throw new Error("Delegation was not persisted.");
+    expect(saved.ownerUserId).toBe(ownerId);
+    expect(saved.agentId).toBe(botId);
+    expect(saved.channelId).toBe(channelId);
+    expect(
+      (await callTool(connection, "list_responsibilities", {})).text,
+    ).toContain(saved.id);
+    for (const foreign of [
+      { ...connection, actorId: strangerId },
+      { ...connection, botId: "other-bot" },
+    ]) {
+      expect(
+        (await callTool(foreign, "pause_responsibility", { id: saved.id }))
+          .isError,
+      ).toBe(true);
+    }
+    expect(
+      (
+        await callTool(connection, "update_responsibility", {
+          id: saved.id,
+          patch: { title: "Track relevant upstream" },
+        })
+      ).isError,
+    ).toBe(false);
+    expect((await store.get(ownerId, saved.id)).title).toBe(
+      "Track relevant upstream",
+    );
+    const queued = await callTool(connection, "run_responsibility", {
+      id: saved.id,
+    });
+    expect(queued.isError).toBe(false);
+    const result = JSON.parse(queued.text);
+    keys.push(...result.runIds);
+    expect(result.runIds).toHaveLength(1);
+    expect(
+      (await callTool(connection, "pause_responsibility", { id: saved.id }))
+        .isError,
+    ).toBe(false);
+    expect((await store.get(ownerId, saved.id)).status).toBe("paused");
+    expect(await store.beginRun(result.runIds[0])).toBeNull();
+    expect(
+      (await callTool(connection, "resume_responsibility", { id: saved.id }))
+        .isError,
+    ).toBe(false);
+    expect((await store.get(ownerId, saved.id)).status).toBe("active");
+    expect(
+      (await callTool(connection, "complete_responsibility", { id: saved.id }))
+        .isError,
+    ).toBe(false);
+    expect((await store.get(ownerId, saved.id)).status).toBe("completed");
+    expect(
+      (await callTool(connection, "resume_responsibility", { id: saved.id }))
+        .isError,
+    ).toBe(true);
+    expect(
+      (
+        await callTool(connection, "create_responsibility", {
+          title: "Forged",
+          instruction: "Work",
+          successCriteria: "Done",
+          ownerUserId: strangerId,
+        })
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await callTool(connection, "create_responsibility", {
+          title: "Wrong channel",
+          instruction: "Work",
+          successCriteria: "Done",
+          channelId: "foreign",
+        })
+      ).isError,
+    ).toBe(true);
+  } finally {
+    useResponsibilityChatTools(null);
+  }
 });
 
 test("competing deliveries atomically produce one event, run and queue item", async () => {
