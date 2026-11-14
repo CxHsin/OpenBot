@@ -32,7 +32,64 @@ tags:
     description: >-
       The Bots a person can see: their own, those shared with them, the ones an
       administrator assigned them, and the ones that come with OpenBot.
+  - name: Reactions
+    description: >-
+      The reactions a Bot leaves on a person's message in place of a line of
+      its own, when the message only needs an acknowledgement.
 paths:
+  /api/v2/organizations/{organizationId}/reactions:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationId'
+    get:
+      tags: [Reactions]
+      operationId: listReactions
+      summary: List reactions in a conversation
+      description: >-
+        Return one page of the reactions Bots left on the caller's messages in
+        one of their conversations, named by its thread. Another person's
+        thread answers with an empty list. A missing cursor starts at the
+        first page and nextCursor null ends the list. Today's server returns
+        every reaction on the first page.
+      security:
+        - webSession: []
+        - appOAuth: [reactions:read]
+        - apiKey: []
+      parameters:
+        - name: threadId
+          in: query
+          required: true
+          description: The conversation's thread, as its messages name it.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of reactions.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReactionPage'
+              examples:
+                lastPage:
+                  $ref: '#/components/examples/ReactionPageLast'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/OrganizationNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
   /api/v2/organizations/{organizationId}/bots:
     parameters:
       - $ref: '#/components/parameters/OrganizationId'
@@ -83,6 +140,8 @@ paths:
           $ref: '#/components/responses/OrganizationNotFound'
         '500':
           $ref: '#/components/responses/ServerError'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
     post:
       tags: [Bots]
       operationId: createBot
@@ -126,7 +185,7 @@ paths:
                   auth:
                     header: Authorization
                     value: Bearer example-key
-                  harness: langgraph-python
+                  harness: langgraph
       responses:
         '201':
           description: The Bot was created.
@@ -157,6 +216,8 @@ paths:
           $ref: '#/components/responses/IdempotencyConflict'
         '500':
           $ref: '#/components/responses/ServerError'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
   /api/v2/organizations/{organizationId}/bots/{botId}:
     parameters:
       - $ref: '#/components/parameters/OrganizationId'
@@ -195,6 +256,8 @@ paths:
           $ref: '#/components/responses/BotNotFound'
         '500':
           $ref: '#/components/responses/ServerError'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
     patch:
       tags: [Bots]
       operationId: updateBot
@@ -253,6 +316,8 @@ paths:
           $ref: '#/components/responses/IdempotencyConflict'
         '500':
           $ref: '#/components/responses/ServerError'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
     delete:
       tags: [Bots]
       operationId: deleteBot
@@ -283,6 +348,8 @@ paths:
           $ref: '#/components/responses/IdempotencyConflict'
         '500':
           $ref: '#/components/responses/ServerError'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
 components:
   securitySchemes:
     webSession:
@@ -308,6 +375,7 @@ components:
           scopes:
             bots:read: Read the Bots the signed-in person can see.
             bots:write: Create, change and delete the signed-in person's Bots.
+            reactions:read: Read the reactions Bots left on the signed-in person's messages.
     apiKey:
       type: http
       scheme: bearer
@@ -351,11 +419,16 @@ components:
       in: query
       description: >-
         Opaque continuation from the previous page's nextCursor, bound to the
-        organization and the filters that made it.
+        organization and the filters that made it. The server only ever issues
+        cursors written in URL-safe base64 (letters, digits, - and _, no
+        padding) and refuses anything else, so the pattern says so. A cursor
+        that fits the pattern can still be refused: one this list never gave
+        out, or one made for another organization or other filters.
       schema:
         type: string
         minLength: 1
         maxLength: 4096
+        pattern: ^[A-Za-z0-9_-]+$
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -438,8 +511,11 @@ components:
         endpoint:
           type: [string, 'null']
           description: >-
-            The AG-UI address it runs at. Null for a Bot that runs inside
-            OpenBot.
+            The AG-UI address it runs at, as it was stored. Null for a Bot that
+            runs inside OpenBot. Every address saved through this API is an
+            absolute http or https address (see the request's endpoint), but
+            one saved by an older release is returned as it is, so this field
+            states no format.
         hasAuth:
           type: boolean
           description: Whether a key is set for its address. Never the key.
@@ -510,7 +586,42 @@ components:
         nextCursor:
           type: [string, 'null']
           maxLength: 4096
-          description: Pass as cursor for the next page. Null ends the list.
+          pattern: ^[A-Za-z0-9_-]+$
+          description: >-
+            Pass as cursor for the next page. Null ends the list. Written in
+            URL-safe base64, the only form the cursor parameter accepts.
+    Reaction:
+      type: object
+      required: [messageId, agentId, emoji, createdAt]
+      properties:
+        messageId:
+          type: string
+          description: The person's message the reaction is on, by the id its conversation gives it.
+        agentId:
+          type: string
+          description: The Bot that reacted.
+        emoji:
+          type: string
+          description: The reaction itself.
+          example: 👍
+        createdAt:
+          type: string
+          format: date-time
+    ReactionPage:
+      type: object
+      required: [reactions, nextCursor]
+      properties:
+        reactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reaction'
+        nextCursor:
+          type: [string, 'null']
+          maxLength: 4096
+          pattern: ^[A-Za-z0-9_-]+$
+          description: >-
+            Pass as cursor for the next page. Null ends the list. Written in
+            URL-safe base64, the only form the cursor parameter accepts.
     BotResponse:
       type: object
       required: [bot]
@@ -591,9 +702,19 @@ components:
         endpoint:
           type: string
           description: >-
-            The AG-UI address it runs at. Empty or absent on create means it
-            runs inside OpenBot; empty or absent on a change leaves it as it
-            is. The server refuses an address this deployment may not reach.
+            The AG-UI address it runs at: empty, or an absolute http or https
+            address, the only kinds the server has ever taken. Empty or absent
+            on create means it runs inside OpenBot; empty or absent on a
+            change leaves it as it is. An address that fits can still be
+            refused: the server refuses one this deployment may not reach,
+            such as a private network address on a deployment that keeps Bots
+            off it.
+          anyOf:
+            - type: string
+              maxLength: 0
+            - type: string
+              format: uri
+              pattern: ^[Hh][Tt][Tt][Pp][Ss]?://
         auth:
           $ref: '#/components/schemas/BotKey'
         isolated:
@@ -619,8 +740,25 @@ components:
               type: string
               description: >-
                 The framework an agent somebody runs themselves is built on,
-                by its id in OpenBot's harness list. Kept only with an
-                endpoint.
+                by its id in OpenBot's harness list (shared/harnesses.json),
+                which the server checks every create against. Empty means none
+                was named, as for an agent somebody already runs. "byo-url" is
+                not one: it names no framework. Kept only with an endpoint.
+              enum:
+                - ''
+                - crewai
+                - llamaindex
+                - agno
+                - langgraph
+                - google-adk
+                - antigravity
+                - pydantic-ai
+                - microsoft-agent-framework
+                - claude-agent-sdk
+                - strands
+                - ag2
+                - langroid
+                - mastra
     UpdateBotRequest:
       description: A Bot's fields after the change.
       allOf:
@@ -878,7 +1016,40 @@ components:
                 retryable: true
                 requestId: req_example
                 traceId: trace_example
+    UnexpectedError:
+      description: >-
+        Any other status, in the same problem details shape. The statuses
+        listed for an operation are the ones its own rules produce; this
+        covers the rest, such as a proxy in front of the server refusing a
+        request too large to read (413, 414, 431) or a gateway that cannot
+        reach it (502, 503, 504). A client reads detail and retryable from
+        it like any other problem.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            unavailable:
+              value:
+                type: https://open.bot/errors/service-unavailable
+                title: OpenBot isn't available right now.
+                status: 503
+                detail: OpenBot isn't available right now. Try again in a moment.
+                code: SERVICE_UNAVAILABLE
+                category: dependency
+                retryable: true
+                requestId: req_example
+                traceId: trace_example
   examples:
+    ReactionPageLast:
+      summary: Every reaction in a conversation, on one page.
+      value:
+        reactions:
+          - messageId: msg_2f0c1e7a
+            agentId: general-assistant
+            emoji: 👍
+            createdAt: '2026-11-12T22:41:07.000Z'
+        nextCursor: null
     BotPageLast:
       summary: Every Bot, on one page.
       value:
