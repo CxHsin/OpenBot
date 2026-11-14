@@ -1,5 +1,5 @@
 import { IconLogout, IconPlus, IconSearch } from "@tabler/icons-react";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Link, type LinkOptions, useParams } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type * as React from "react";
@@ -28,6 +28,7 @@ import {
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { currentUserQueryOptions } from "@/lib/auth/queries";
 import { useSignOutOffered } from "@/lib/auth/sign-out-offered";
 import { untitledLine } from "@/lib/channels/label";
 import {
@@ -58,9 +59,9 @@ import {
   useLiveRecording,
 } from "../browser/browser-nav-item";
 import { navigationRender } from "../edition/team-features-dialog";
+import { OpenBotVersion } from "../layout/openbot-version";
 import { Button } from "../ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../ui/empty";
-import { AccountLabel } from "./account-label";
 import { Channel } from "./channel";
 import { ChannelPagination } from "./channel-pagination";
 import { useSignOut } from "./use-sign-out";
@@ -68,6 +69,23 @@ import { useSignOut } from "./use-sign-out";
 const appLinkOptions = { to: "/" } satisfies LinkOptions;
 
 const userMenuItemClassName = "gap-2 px-2 py-1.5";
+
+function UserAvatar() {
+  const { data: currentUser } = useQuery(currentUserQueryOptions());
+  const initials =
+    currentUser?.name
+      ?.trim()
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase())
+      .join("") ?? currentUser?.email.slice(0, 2).toUpperCase();
+
+  return (
+    <div className="size-[28px] shrink-0 bg-muted-foreground/10 text-foreground/70 rounded-full flex items-center justify-center text-xs overflow-hidden">
+      {initials}
+    </div>
+  );
+}
 
 /**
  * Cap layout animation because `layout` measures every animated row on each reorder.
@@ -375,6 +393,7 @@ function SkillsNavItem({ item }: { item: NavigationLink }) {
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const emphasis = useMessageListEmphasis();
+  const { data: currentUser } = useQuery(currentUserQueryOptions());
   const signOut = useSignOut();
   const signOutOffered = useSignOutOffered();
   const channels = useInfiniteQuery(channelListQueryOptions());
@@ -554,7 +573,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   <SidebarMenuButton className="hover:bg-foreground/5 h-10" />
                 }
               >
-                <AccountLabel />
+                <UserAvatar />
+                {/* The name and the release the server runs, side by side: 80/20 of the row. */}
+                <span className="grid min-w-0 flex-1 grid-cols-[4fr_1fr] items-center gap-2">
+                  <span className="truncate text-sm trackint-tight">
+                    {currentUser?.name || currentUser?.email}
+                  </span>
+                  <OpenBotVersion className="text-right text-[10px] leading-3 text-muted-foreground" />
+                </span>
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="start"

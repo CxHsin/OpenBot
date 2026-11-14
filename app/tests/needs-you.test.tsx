@@ -29,7 +29,6 @@ import {
   TASKS_VIEW_STORAGE_KEY,
   TasksScreen,
 } from "@/skins/openduet/tasks-screen";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /*
@@ -220,14 +219,15 @@ function serving() {
       return Response.json({ routines: [], sweep: null });
     if (path === "/api/responsibilities")
       return Response.json({ responsibilities: [] });
-    const bots = answerBotsList(input, init, {
-      visible: [
-        { id: "inbox", name: "Inbox Bot", mine: true },
-        { id: "ops", name: "Ops Bot", mine: true },
-      ],
-      hidden: [],
-    });
-    if (bots) return bots;
+    if (path.startsWith("/api/agents"))
+      return Response.json({
+        agents: path.includes("hidden=true")
+          ? []
+          : [
+              { id: "inbox", name: "Inbox Bot", mine: true },
+              { id: "ops", name: "Ops Bot", mine: true },
+            ],
+      });
     return Response.json({ error: "not served" }, { status: 404 });
   }) as unknown as typeof fetch;
 }

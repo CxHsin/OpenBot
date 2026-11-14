@@ -12,7 +12,6 @@ import { SkillTools } from "@/lib/copilot/skill-tools";
 import { pluginsPageQueryOptions } from "@/lib/plugins/queries";
 import { SKILL_CREATOR_SLUG } from "@/lib/skills/proposal";
 import { queryClient } from "@/query-client";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /**
@@ -85,7 +84,7 @@ function serving(grant: string) {
     release = resolve;
   });
   global.fetch = Object.assign(
-    async (input: RequestInfo | URL, init?: RequestInit) => {
+    async (input: RequestInfo | URL) => {
       const path = new URL(String(input), "http://127.0.0.1").pathname;
       if (path === `/api/plugins/for/${BOT}`)
         return Response.json({
@@ -98,10 +97,9 @@ function serving(grant: string) {
         return Response.json({
           user: { id: ME, email: "me@example.com", role: "user" },
         });
-      const bots = answerBotsList(input, init, { visible: [existingBot] });
-      if (bots) {
+      if (path === "/api/agents") {
         await released;
-        return bots;
+        return Response.json({ agents: [existingBot] });
       }
       if (path === "/api/plugins") {
         await released;

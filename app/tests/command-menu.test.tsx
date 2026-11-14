@@ -29,7 +29,6 @@ import { CommandMenu } from "@/components/navigation/command-menu";
 import { authKeys } from "@/lib/auth/queries";
 import type { ChannelSummary } from "@/lib/channels/queries";
 import { deploymentKeys } from "@/lib/deployment/queries";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /**
@@ -88,13 +87,13 @@ beforeEach(() => {
     }
     if (url.pathname === "/api/channels")
       return Response.json({ channels: RECENT, nextCursor: null });
-    const bots = answerBotsList(url, init, {
-      visible: [
-        { id: "helper", name: "Helper", avatarSeed: "helper" },
-        { id: "budget", name: "Budget Buddy", avatarSeed: "budget" },
-      ],
-    });
-    if (bots) return bots;
+    if (url.pathname === "/api/agents")
+      return Response.json({
+        agents: [
+          { id: "helper", name: "Helper", avatarSeed: "helper" },
+          { id: "budget", name: "Budget Buddy", avatarSeed: "budget" },
+        ],
+      });
     return Response.json({ error: "not served" }, { status: 404 });
   }) as typeof fetch;
 });

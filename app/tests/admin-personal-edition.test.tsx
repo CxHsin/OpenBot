@@ -19,7 +19,6 @@ import { cleanup, render, within } from "@testing-library/react";
 import type * as React from "react";
 import { deploymentKeys } from "@/lib/deployment/queries";
 import { queryClient } from "@/query-client";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 import { vendoredMarkFor } from "./vendored-marks";
 
@@ -81,7 +80,7 @@ let asked: string[] = [];
 /** What the personal edition's server answers. Everything else is a 404, as the edition gate's. */
 function servePersonal() {
   asked = [];
-  global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  global.fetch = (async (input: RequestInfo | URL) => {
     const path = new URL(String(input), "http://localhost/").pathname;
     asked.push(path);
     if (path === "/api/models/available")
@@ -118,8 +117,8 @@ function servePersonal() {
         bots: [],
         pings: { sent: 0, itemsPerPing: null },
       });
-    const bots = answerBotsList(path, init, { visible: [] });
-    if (bots) return bots;
+    if (path === "/api/agents")
+      return Response.json({ agents: [], total: 0, hasMore: false });
     return Response.json({ error: "not served" }, { status: 404 });
   }) as unknown as typeof fetch;
 }

@@ -21,7 +21,6 @@ import type * as React from "react";
 import { CheckInRoutePage } from "@/components/suggestions/check-in-page";
 import { ProactiveResearchSettings } from "@/components/suggestions/proactive-panel";
 import { queryClient } from "@/query-client";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /*
@@ -129,10 +128,8 @@ function serving() {
         ],
         nextCursor: null,
       });
-    const bots = answerBotsList(input, init, {
-      visible: [{ id: "expenses", name: "Expenses" }],
-    });
-    if (bots) return bots;
+    if (path.startsWith("/api/agents"))
+      return Response.json({ agents: [{ id: "expenses", name: "Expenses" }] });
     return Response.json({ error: "not served" }, { status: 404 });
   }) as unknown as typeof fetch;
 }

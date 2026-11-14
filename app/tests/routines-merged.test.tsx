@@ -26,7 +26,6 @@ import { mergeRoutines } from "@/lib/routines/merged";
 import type { RoutineRecord } from "@/lib/routines/queries";
 import { Route as BotGoalsRoute } from "@/routes/_authed/_app/bots.$agentId.responsibilities";
 import { Route as ResponsibilitiesRoute } from "@/routes/_authed/_app/responsibilities";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /**
@@ -155,13 +154,14 @@ function serving({
         nextCursor: null,
       });
     }
-    const bots = answerBotsList(input, init, {
-      visible: [
-        { id: "expenses", name: "Expenses" },
-        { id: "knowledge", name: "Knowledge" },
-      ],
-    });
-    if (bots) return bots;
+    if (url.startsWith("/api/agents")) {
+      return Response.json({
+        agents: [
+          { id: "expenses", name: "Expenses" },
+          { id: "knowledge", name: "Knowledge" },
+        ],
+      });
+    }
     return Response.json({ runs: [], triggers: [], requests: [] });
   }) as unknown as typeof fetch;
 }
@@ -575,7 +575,7 @@ test("a schedule's page pauses it, runs it, shows its runs and deletes it", asyn
   );
   // Delete still asks first.
   const confirm = await within(document.body).findByRole("dialog", {
-    name: "Delete “Post the standup summary.”?",
+    name: 'Delete "Weekdays at 09:00"?',
   });
   expect(writes.map((write) => write.request)).not.toContain(
     "DELETE /api/routines/r1",
@@ -615,7 +615,7 @@ test("a refused delete is said in its confirmation, and Delete can be pressed ag
   );
   const confirm = within(
     await within(document.body).findByRole("dialog", {
-      name: "Delete “Post the standup summary.”?",
+      name: 'Delete "Weekdays at 09:00"?',
     }),
   );
   fireEvent.click(confirm.getByRole("button", { name: "Delete" }));

@@ -12,7 +12,6 @@ import { AppsSections, SkillsSections } from "@/components/bot-profile/access";
 import type { AgentProfile } from "@/lib/agents/queries";
 import type { AppAccess } from "@/lib/app-access/queries";
 import { appAccess } from "./app-access-fixture";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /**
@@ -102,8 +101,7 @@ function serving(held: AppAccess[]) {
           grantable: true,
         },
       });
-    const bots = answerBotsList(url, init, { visible: [] });
-    if (bots) return bots;
+    if (url.includes("/api/agents")) return Response.json({ agents: [] });
     return Response.json({
       user: { id: "me", role: "user", email: "me@example.test", name: "Me" },
     });

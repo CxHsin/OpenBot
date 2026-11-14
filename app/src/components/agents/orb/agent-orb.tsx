@@ -100,12 +100,6 @@ export interface AgentOrbProps {
    * scrolled off screen or in a hidden tab, so a loop nobody watches does not keep running.
    */
   still?: boolean;
-  /**
-   * Drawn in `colors` as given, in every state: for a Bot's orb, whose colors are how a person
-   * tells that Bot from another. The state still sets how it moves, but never mutes it at rest or
-   * turns its hue while it works.
-   */
-  trueColors?: boolean;
 }
 
 const AgentOrb: React.FC<AgentOrbProps> = ({
@@ -116,7 +110,6 @@ const AgentOrb: React.FC<AgentOrbProps> = ({
   amplitude,
   state = "idle",
   still = false,
-  trueColors = false,
 }) => {
   const shouldReduceMotion = useReducedMotion() || still;
   const amplitudeValue = useAmplitudeValue(amplitude);
@@ -300,9 +293,7 @@ const AgentOrb: React.FC<AgentOrbProps> = ({
             // Saturation and hue only affect the gradient disc. Applying them
             // to the whole component would desaturate the semantic accent too,
             // and `error` would lose the very red that identifies it.
-            filter: trueColors
-              ? undefined
-              : `saturate(${stateMotion.saturation}) hue-rotate(${stateMotion.hueRotate}deg)`,
+            filter: `saturate(${stateMotion.saturation}) hue-rotate(${stateMotion.hueRotate}deg)`,
             height: "100%",
             scale: reactiveScale,
             width: "100%",

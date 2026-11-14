@@ -467,28 +467,6 @@ export function AllowedModelsDialog({
   );
 }
 
-/** The Bot a usage row names when the model is one nobody reported (`remote:<bot id>`). */
-const UNREPORTED = /^remote:(.+)$/;
-
-/** A usage row's model, or what stands in for one its Bot never named. */
-export function usageModelName(model: string): string {
-  return UNREPORTED.test(model) ? "Model not reported" : model;
-}
-
-/**
- * How the row's model is known, said for an admin. The server's words (`configured`, `observed`,
- * `unknown`) were printed as they came, and "unknown" beside "remote:picked-harness" said nothing
- * about why.
- */
-export function usageSourceWords(model: string, source: string): string {
-  if (source === "configured") return "chosen by OpenBot";
-  if (source === "observed") return "reported by the Bot";
-  const bot = UNREPORTED.exec(model)?.[1];
-  return bot
-    ? `${bot} picks its own model and didn't say which`
-    : "the Bot didn't say which model it used";
-}
-
 /**
  * Admin, Providers: which models Bots ran on in the last 30 days. Only a team has an allowlist, so
  * only a team is told that refused runs are counted.
@@ -523,14 +501,14 @@ export function ModelUsageSection({ team }: { team: boolean }) {
                   <IconChartBar />
                 </ItemMedia>
                 <ItemContent>
-                  <ItemTitle>{usageModelName(row.model)}</ItemTitle>
+                  <ItemTitle>{row.model}</ItemTitle>
                   <ItemDescription>
                     {row.runs} {row.runs === 1 ? "run" : "runs"} by {row.people}{" "}
                     {row.people === 1 ? "person" : "people"}
                     {row.refused > 0
                       ? ` · ${row.refused} off the allowlist`
                       : ""}{" "}
-                    · {usageSourceWords(row.model, row.source)}
+                    · {row.source}
                   </ItemDescription>
                 </ItemContent>
                 <ItemActions>

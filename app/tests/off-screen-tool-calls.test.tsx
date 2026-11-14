@@ -24,7 +24,6 @@ import {
 import { GALLERY_COMPONENTS } from "@/lib/copilot/gallery-registry";
 import { CopilotProvider } from "@/lib/copilot/provider";
 import { queryClient } from "@/query-client";
-import { answerBotsList, botPath } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /**
@@ -321,18 +320,18 @@ beforeAll(() => {
         return signIn(url.pathname, request);
       // The two Bots as the server describes them: the crm Bot is this person's, the other one is
       // a Team Bot they are a teammate on, whose computer they may not drive.
-      if (url.pathname === botPath(BOT))
+      if (url.pathname === `/api/agents/${BOT}`)
         return NativeResponse.json({
-          bot: {
+          agent: {
             id: BOT,
             name: "Accounts",
             visibility: "public",
             canManage: true,
           },
         });
-      if (url.pathname === botPath(OTHER))
+      if (url.pathname === `/api/agents/${OTHER}`)
         return NativeResponse.json({
-          bot: {
+          agent: {
             id: OTHER,
             name: "Other",
             visibility: "team",
@@ -399,8 +398,8 @@ beforeAll(() => {
         return NativeResponse.json({ messages: stored });
       if (url.pathname.match(/\/threads\/[^/]+\/messages$/))
         return NativeResponse.json({ messages: [] });
-      const bots = answerBotsList(url, init, { visible: [] });
-      if (bots) return bots;
+      if (url.pathname === "/api/agents")
+        return NativeResponse.json({ agents: [] });
       if (/^\/api\/plugins\/for\/[^/]+$/.test(url.pathname))
         return NativeResponse.json({ skills: [], tools: [] });
       if (url.pathname === "/api/voice/sessions")

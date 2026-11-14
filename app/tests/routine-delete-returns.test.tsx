@@ -13,7 +13,6 @@ import userEvent from "@testing-library/user-event";
 import { RoutineRoutePage } from "@/components/routines/routine-page";
 import type { RoutineRecord } from "@/lib/routines/queries";
 import { queryClient } from "@/query-client";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /*
@@ -75,13 +74,12 @@ function serving() {
         routines: deleted ? [] : [ROUTINE],
         sweep: { lastSweptAt: new Date().toISOString(), working: true },
       });
-    const bots = answerBotsList(path, init, {
-      visible: [
-        { id: "lead-desk", name: "Lead Desk", avatarSeed: "lead-desk" },
-      ],
-      hidden: [],
-    });
-    if (bots) return bots;
+    if (path.startsWith("/api/agents"))
+      return Response.json({
+        agents: path.includes("hidden=true")
+          ? []
+          : [{ id: "lead-desk", name: "Lead Desk", avatarSeed: "lead-desk" }],
+      });
     return Response.json({});
   }) as unknown as typeof fetch;
 }
@@ -120,9 +118,8 @@ test("Delete on a routine's page goes back to Routines", async () => {
       name: "Delete the routine scheduled Weekdays at 09:00",
     }),
   );
-  // Asked about by its name, as its heading says, never by its schedule.
   const dialog = await view.findByRole("dialog", {
-    name: "Delete “Morning leads”?",
+    name: 'Delete "Weekdays at 09:00"?',
   });
   await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 

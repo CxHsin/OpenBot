@@ -22,7 +22,6 @@ import { SetupSections } from "@/components/bot-profile/setup";
 import { type AgentProfile, agentKeys } from "@/lib/agents/queries";
 import { computerKeys } from "@/lib/computers/queries";
 import { Route as NewRuleRoute } from "@/routes/_authed/admin/boundaries_.new";
-import { BOTS_PATH, botPath } from "./bots-api";
 
 /**
  * The Enter that confirms a character an input method is composing is not an Enter.
@@ -94,8 +93,8 @@ beforeEach(() => {
       if (path === "/api/agents/capabilities") {
         return json({ capabilities: { builtInAvailable: true } });
       }
-      if (path === botPath(PROFILE.id)) {
-        return json({ bot: PROFILE });
+      if (path === `/api/agents/${PROFILE.id}`) {
+        return json({ agent: method === "PATCH" ? PROFILE : PROFILE });
       }
       return new Response(null, { status: 404 });
     },
@@ -166,7 +165,7 @@ test("a coworker's name is not saved by the Enter that confirms a composed chara
   });
   await settle();
   expect(writes.map((write) => write.request)).toEqual([
-    `PATCH ${botPath(PROFILE.id)}`,
+    `PATCH /api/agents/${PROFILE.id}`,
   ]);
   expect(writes[0]?.body).toMatchObject({ name: "経費" });
 });
@@ -189,7 +188,7 @@ test("the New Bot sheet does not create from the Enter that confirms a composed 
     fireEvent.keyDown(name, { key: "Enter", keyCode: 13 });
   });
   await settle();
-  expect(writes.map((write) => write.request)).toEqual([`POST ${BOTS_PATH}`]);
+  expect(writes.map((write) => write.request)).toEqual(["POST /api/agents"]);
 });
 
 test("a boundary rule is not added by the Enter that confirms a composed character", async () => {

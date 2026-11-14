@@ -33,7 +33,6 @@ import type {
   OrganizationNotFoundResponse,
   ServerErrorResponse,
   UnauthenticatedResponse,
-  UnexpectedErrorResponse,
   UpdateBotHeaders,
   UpdateBotRequest,
   UpdateBotResponse,
@@ -116,8 +115,7 @@ export const getListBotsQueryOptions = <
     | UnauthenticatedResponse
     | ForbiddenResponse
     | OrganizationNotFoundResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
 >(
   organizationId: string,
   params?: ListBotsParams,
@@ -155,8 +153,7 @@ export type ListBotsQueryError =
   | UnauthenticatedResponse
   | ForbiddenResponse
   | OrganizationNotFoundResponse
-  | ServerErrorResponse
-  | UnexpectedErrorResponse;
+  | ServerErrorResponse;
 
 export function useListBots<
   TData = Awaited<ReturnType<typeof listBots>>,
@@ -165,8 +162,7 @@ export function useListBots<
     | UnauthenticatedResponse
     | ForbiddenResponse
     | OrganizationNotFoundResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
 >(
   organizationId: string,
   params: undefined | ListBotsParams,
@@ -195,8 +191,7 @@ export function useListBots<
     | UnauthenticatedResponse
     | ForbiddenResponse
     | OrganizationNotFoundResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
 >(
   organizationId: string,
   params?: ListBotsParams,
@@ -225,8 +220,7 @@ export function useListBots<
     | UnauthenticatedResponse
     | ForbiddenResponse
     | OrganizationNotFoundResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
 >(
   organizationId: string,
   params?: ListBotsParams,
@@ -251,8 +245,7 @@ export function useListBots<
     | UnauthenticatedResponse
     | ForbiddenResponse
     | OrganizationNotFoundResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
 >(
   organizationId: string,
   params?: ListBotsParams,
@@ -332,8 +325,7 @@ export const getCreateBotMutationOptions = <
     | BotForbiddenResponse
     | OrganizationNotFoundResponse
     | IdempotencyConflictResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
   TContext = unknown,
 >(options?: {
   mutation?: UseMutationOptions<
@@ -380,8 +372,7 @@ export type CreateBotMutationError =
   | BotForbiddenResponse
   | OrganizationNotFoundResponse
   | IdempotencyConflictResponse
-  | ServerErrorResponse
-  | UnexpectedErrorResponse;
+  | ServerErrorResponse;
 export type CreateBotMutationVariables = {
   organizationId: string;
   data: CreateBotRequest;
@@ -398,8 +389,7 @@ export const useCreateBot = <
     | BotForbiddenResponse
     | OrganizationNotFoundResponse
     | IdempotencyConflictResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
   TContext = unknown,
 >(
   options?: {
@@ -450,8 +440,7 @@ export const getGetBotQueryOptions = <
     | UnauthenticatedResponse
     | ForbiddenResponse
     | BotNotFoundResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
 >(
   organizationId: string,
   botId: string,
@@ -491,8 +480,7 @@ export type GetBotQueryError =
   | UnauthenticatedResponse
   | ForbiddenResponse
   | BotNotFoundResponse
-  | ServerErrorResponse
-  | UnexpectedErrorResponse;
+  | ServerErrorResponse;
 
 export function useGetBot<
   TData = Awaited<ReturnType<typeof getBot>>,
@@ -501,8 +489,7 @@ export function useGetBot<
     | UnauthenticatedResponse
     | ForbiddenResponse
     | BotNotFoundResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
 >(
   organizationId: string,
   botId: string,
@@ -531,8 +518,7 @@ export function useGetBot<
     | UnauthenticatedResponse
     | ForbiddenResponse
     | BotNotFoundResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
 >(
   organizationId: string,
   botId: string,
@@ -561,8 +547,7 @@ export function useGetBot<
     | UnauthenticatedResponse
     | ForbiddenResponse
     | BotNotFoundResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
 >(
   organizationId: string,
   botId: string,
@@ -587,8 +572,7 @@ export function useGetBot<
     | UnauthenticatedResponse
     | ForbiddenResponse
     | BotNotFoundResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
 >(
   organizationId: string,
   botId: string,
@@ -669,8 +653,7 @@ export const getUpdateBotMutationOptions = <
     | BotForbiddenResponse
     | BotNotFoundResponse
     | IdempotencyConflictResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
   TContext = unknown,
 >(options?: {
   mutation?: UseMutationOptions<
@@ -717,8 +700,7 @@ export type UpdateBotMutationError =
   | BotForbiddenResponse
   | BotNotFoundResponse
   | IdempotencyConflictResponse
-  | ServerErrorResponse
-  | UnexpectedErrorResponse;
+  | ServerErrorResponse;
 export type UpdateBotMutationVariables = {
   organizationId: string;
   botId: string;
@@ -736,8 +718,7 @@ export const useUpdateBot = <
     | BotForbiddenResponse
     | BotNotFoundResponse
     | IdempotencyConflictResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
   TContext = unknown,
 >(
   options?: {
@@ -809,8 +790,7 @@ export const getDeleteBotMutationOptions = <
     | BotForbiddenResponse
     | BotNotFoundResponse
     | IdempotencyConflictResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
   TContext = unknown,
 >(options?: {
   mutation?: UseMutationOptions<
@@ -857,8 +837,7 @@ export type DeleteBotMutationError =
   | BotForbiddenResponse
   | BotNotFoundResponse
   | IdempotencyConflictResponse
-  | ServerErrorResponse
-  | UnexpectedErrorResponse;
+  | ServerErrorResponse;
 export type DeleteBotMutationVariables = {
   organizationId: string;
   botId: string;
@@ -875,8 +854,7 @@ export const useDeleteBot = <
     | BotForbiddenResponse
     | BotNotFoundResponse
     | IdempotencyConflictResponse
-    | ServerErrorResponse
-    | UnexpectedErrorResponse,
+    | ServerErrorResponse,
   TContext = unknown,
 >(
   options?: {

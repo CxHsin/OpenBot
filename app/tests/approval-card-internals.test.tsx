@@ -5,7 +5,6 @@ import { cleanup, render } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { WaitingForYou } from "@/components/approvals/waiting";
 import { BotNeedsYou } from "@/components/needs-you/board";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /*
@@ -54,7 +53,7 @@ const request = (
 });
 
 function serving() {
-  global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  global.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url === "/api/approvals")
       return Response.json({
@@ -86,11 +85,9 @@ function serving() {
     if (url === "/api/tasks") return Response.json({ tasks: [] });
     if (url.startsWith("/api/channels"))
       return Response.json({ channels: [], nextCursor: null });
-    return (
-      answerBotsList(input, init, {
-        visible: [{ id: "researcher", name: "Researcher" }],
-      }) ?? Response.json({})
-    );
+    return Response.json({
+      agents: [{ id: "researcher", name: "Researcher" }],
+    });
   }) as unknown as typeof fetch;
 }
 

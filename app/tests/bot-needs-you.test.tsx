@@ -18,7 +18,6 @@ import {
 import type { ReactNode } from "react";
 import { BotNeedsYou } from "@/components/needs-you/board";
 import { SuggestionsInbox } from "@/components/suggestions/proactive-panel";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /**
@@ -104,14 +103,12 @@ function serving() {
     if (url === "/api/tasks") return Response.json({ tasks: [] });
     if (url.startsWith("/api/channels"))
       return Response.json({ channels: [], nextCursor: null });
-    return (
-      answerBotsList(input, init, {
-        visible: [
-          { id: "expenses", name: "Expenses" },
-          { id: "knowledge", name: "Knowledge" },
-        ],
-      }) ?? Response.json({})
-    );
+    return Response.json({
+      agents: [
+        { id: "expenses", name: "Expenses" },
+        { id: "knowledge", name: "Knowledge" },
+      ],
+    });
   }) as unknown as typeof fetch;
 }
 

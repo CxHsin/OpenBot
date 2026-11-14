@@ -5,7 +5,6 @@ import {
   answerListBots,
   answerReadBot,
 } from "@/lib/agents/answers";
-import { answerBotsList, BOTS_PATH } from "./bots-api";
 
 /**
  * What the three reading tools say, asked cold.
@@ -81,11 +80,12 @@ afterAll(() => {
 /** How many times the transport was reached, so "it fetched" is asserted rather than assumed. */
 let calls: string[] = [];
 
-globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+globalThis.fetch = (async (input: RequestInfo | URL) => {
   const path = typeof input === "string" ? input : input.toString();
   calls.push(path);
-  const bots = answerBotsList(input, init, { visible: AGENTS });
-  if (bots) return bots;
+  if (path.startsWith("/api/agents")) {
+    return Response.json({ agents: AGENTS });
+  }
   if (path === "/api/plugins") {
     return Response.json({
       catalogue: [],
@@ -107,7 +107,7 @@ function coldClient(): QueryClient {
 test("the roster is fetched when asked, not read off a render", async () => {
   const answer = await answerListBots(coldClient());
 
-  expect(calls.some((path) => path.startsWith(BOTS_PATH))).toBe(true);
+  expect(calls.some((path) => path.startsWith("/api/agents"))).toBe(true);
   expect(answer).toContain("2 coworkers already exist here");
   expect(answer).toContain("General Assistant — Everyday Work");
   // Whose it is and where it runs, which is what stops a duplicate being proposed.
@@ -153,11 +153,10 @@ test("a coworker that is not here is named rather than guessed at", async () => 
 test("a genuinely empty deployment is described as empty", async () => {
   const client = coldClient();
   const previous = globalThis.fetch;
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
     const path = typeof input === "string" ? input : input.toString();
     calls.push(path);
-    const bots = answerBotsList(input, init, { visible: [] });
-    if (bots) return bots;
+    if (path.startsWith("/api/agents")) return Response.json({ agents: [] });
     return Response.json({
       catalogue: [],
       botsMayCallBack: false,

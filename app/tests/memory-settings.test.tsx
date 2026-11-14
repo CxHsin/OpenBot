@@ -5,7 +5,6 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryList, RememberFact } from "@/components/memory/memories";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /** Memory: what the person's Bots know about them, and which Bot learned it. */
@@ -59,10 +58,11 @@ function serving() {
       }
       return Response.json({ ok: true });
     }
-    const bots = answerBotsList(url, init, {
-      visible: [{ id: "expenses", name: "Expenses", mine: true }],
-    });
-    if (bots) return bots;
+    if (url.startsWith("/api/agents")) {
+      return Response.json({
+        agents: [{ id: "expenses", name: "Expenses", mine: true }],
+      });
+    }
     return Response.json({
       memories: [
         memory({}),

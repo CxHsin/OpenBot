@@ -11,7 +11,6 @@ import { createRoot } from "react-dom/client";
 import { PageShell } from "@/components/layout/page-shell";
 import { SKINS } from "@/skins/registry";
 import type { SkinId } from "@/skins/types";
-import { answerBotsList } from "./bots-api";
 
 /**
  * A skin's frame around a page, as `_authed/_app` draws it, as a page of its own for
@@ -93,17 +92,16 @@ const bodies: Record<string, unknown> = {
     bots: attention(params.get("attention")),
     lastPingId: null,
   },
-};
-
-window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-  const url = new URL(String(input), location.href);
-  const bots = answerBotsList(url, init, {
-    visible: [
+  "/api/agents": {
+    agents: [
       { id: "b-1", name: "Inbox Bot" },
       { id: "b-2", name: "Ops Bot" },
     ],
-  });
-  if (bots) return bots;
+  },
+};
+
+window.fetch = (async (input: RequestInfo | URL) => {
+  const url = new URL(String(input), location.href);
   if (url.pathname in bodies) return Response.json(bodies[url.pathname]);
   return Response.json({ error: "not served" }, { status: 404 });
 }) as typeof fetch;

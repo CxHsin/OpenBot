@@ -4,7 +4,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render } from "@testing-library/react";
 import { RuleRow } from "@/components/approvals/rules";
 import type { ApprovalRuleRow } from "@/lib/approvals";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /*
@@ -29,7 +28,7 @@ afterEach(() => {
 const GRANT = "host-grant-15407-1794112361547002000";
 
 function serving() {
-  global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  global.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url === "/api/host-access")
       return Response.json({
@@ -44,10 +43,8 @@ function serving() {
         ],
         pending: [],
       });
-    const bots = answerBotsList(input, init, {
-      visible: [{ id: "shopper-bot", name: "Shop" }],
-    });
-    if (bots) return bots;
+    if (url.startsWith("/api/agents"))
+      return Response.json({ agents: [{ id: "shopper-bot", name: "Shop" }] });
     return new Response(null, { status: 404 });
   }) as unknown as typeof fetch;
 }

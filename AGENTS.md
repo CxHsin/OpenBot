@@ -22,7 +22,10 @@ replace them.
 
 ## Hard rules
 
-1. **Stay mergeable with upstream.** `git remote upstream` points at `CopilotKit/openbot`. Prefer a
+1. **Maintain the source-bearing baseline.** Runtime source is pinned to upstream
+   `6d1919a3b53a0730894258f197f3beb4e8db4f2f`; assess later upstream changes individually and do not
+   merge upstream/main wholesale, because merging `f71b0f4b` removed the backend source from this fork.
+   `git remote upstream` points at `CopilotKit/openbot`. Prefer a
    new file or a narrow hook over editing a file upstream is actively changing, and keep our code
    inside `examples/nailong/`, `server/src/`, `shared/`, `evals/` and `docs/`. When an upstream file
    must change, change as little as possible and say why in the commit body.

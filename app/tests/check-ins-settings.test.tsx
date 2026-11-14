@@ -21,7 +21,6 @@ import { ProactiveResearchSettings } from "@/components/suggestions/proactive-pa
 import { authKeys } from "@/lib/auth/queries";
 import { deploymentKeys } from "@/lib/deployment/queries";
 import { queryClient } from "@/query-client";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /*
@@ -84,10 +83,8 @@ function serving() {
         ],
         allowed,
       });
-    const bots = answerBotsList(path, init, {
-      visible: [{ id: "expenses", name: "Expenses" }],
-    });
-    if (bots) return bots;
+    if (path.startsWith("/api/agents"))
+      return Response.json({ agents: [{ id: "expenses", name: "Expenses" }] });
     return Response.json({ error: "not served" }, { status: 404 });
   }) as unknown as typeof fetch;
 }

@@ -13,7 +13,6 @@ import { NewRoutinePage } from "@/components/routines/new-routine-page";
 import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
 import { proactiveKeys } from "@/lib/proactive";
 import { queryClient } from "@/query-client";
-import { answerBotsList } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /** The New routine screen: what it shows, and the writes it makes when submitted. */
@@ -96,13 +95,13 @@ function serving({
         return Response.json({ responsibility: { id: "g1", title: "Goal" } });
       return Response.json({ ok: true });
     }
-    const bots = answerBotsList(input, init, {
-      visible: [
-        { id: "bot-1", name: "Bot One" },
-        { id: "bot-2", name: "Bot Two" },
-      ],
-    });
-    if (bots) return bots;
+    if (url.startsWith("/api/agents"))
+      return Response.json({
+        agents: [
+          { id: "bot-1", name: "Bot One" },
+          { id: "bot-2", name: "Bot Two" },
+        ],
+      });
     if (url.startsWith("/api/channels"))
       return Response.json({
         channels: [channel("c1", "Bot One", ["bot-1"])],

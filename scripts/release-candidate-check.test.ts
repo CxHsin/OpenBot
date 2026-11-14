@@ -68,33 +68,17 @@ test("rejects a package.json change beyond the version", () => {
   expect(violations[0]).toContain("package.json");
 });
 
-test("allows a backend-images.env change that only moves the image tag", () => {
+test("allows a Chart.yaml change that only moves appVersion", () => {
   const files = new Map([
     [
-      "backend-images.env",
+      "charts/openbot/Chart.yaml",
       {
-        before: "# The OpenBot images.\nOPENBOT_BACKEND_TAG=v0.3.0-rc.1\n",
-        after: "# The OpenBot images.\nOPENBOT_BACKEND_TAG=v0.3.0\n",
+        before: 'name: openbot\nappVersion: "0.3.0-rc.1"\n',
+        after: 'name: openbot\nappVersion: "0.3.0"\n',
       },
     ],
   ]);
   expect(allowedDiff(files)).toEqual([]);
-});
-
-test("refuses a backend-images.env change beyond the image tag", () => {
-  const files = new Map([
-    [
-      "backend-images.env",
-      {
-        before: "# The OpenBot images.\nOPENBOT_BACKEND_TAG=v0.3.0-rc.1\n",
-        after:
-          "# The OpenBot images.\nOPENBOT_BACKEND_TAG=v0.3.0\nSERVER_IMAGE=elsewhere\n",
-      },
-    ],
-  ]);
-  expect(allowedDiff(files)).toEqual([
-    "backend-images.env: changed beyond the version",
-  ]);
 });
 
 test("allows a Cargo.lock change that only moves the desktop version", () => {

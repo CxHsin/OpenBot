@@ -21,7 +21,6 @@ import {
 } from "@/lib/channels/queries";
 import { UNANSWERED } from "@/lib/copilot/repair-history";
 import { queryClient } from "@/query-client";
-import { answerBotsList, botPath } from "./bots-api";
 
 /**
  * A run whose live stream reaches the browser out of shape is read back from the thread, and the
@@ -237,13 +236,13 @@ beforeAll(() => {
       );
       const request = () =>
         input instanceof Request ? input : new Request(url, init);
-      const bots = answerBotsList(url, init, { visible: [] });
-      if (bots) return bots;
+      if (url.pathname === "/api/agents")
+        return NativeResponse.json({ agents: [] });
       if (url.pathname === "/api/plugins/for/broken-stream-bot")
         return NativeResponse.json({ skills: [], tools: [] });
-      if (url.pathname === botPath("broken-stream-bot"))
+      if (url.pathname === "/api/agents/broken-stream-bot")
         return NativeResponse.json({
-          bot: {
+          agent: {
             id: "broken-stream-bot",
             visibility: "public",
             canManage: true,

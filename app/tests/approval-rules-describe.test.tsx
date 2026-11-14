@@ -29,7 +29,6 @@ import type {
 import type { ApprovalRuleTranslation } from "@/lib/approval-rules/translate";
 import type { ApprovalRuleInput } from "@/lib/approvals";
 import { Route as DescribeRoute } from "@/routes/_authed/admin/approvals_.describe";
-import { answerBotsList } from "./bots-api";
 
 /**
  * Team approval rules described in English, on Admin → Approvals → Describe it in words: the model's
@@ -144,10 +143,10 @@ beforeEach(() => {
       return Response.json(checked(body.rules));
     if (path.endsWith("/api/approvals/team/rules/batch"))
       return Response.json({ rules: body.rules }, { status: 201 });
-    const bots = answerBotsList(path, init, {
-      visible: [{ id: SALES, name: "Sales Assistant" }],
-    });
-    if (bots) return bots;
+    if (path.includes("/api/agents"))
+      return Response.json({
+        agents: [{ id: SALES, name: "Sales Assistant" }],
+      });
     return Response.json({ error: "unexpected" }, { status: 404 });
   }) as typeof fetch;
 });

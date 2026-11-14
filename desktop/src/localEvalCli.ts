@@ -200,24 +200,10 @@ export function runLocalEval(
     attempt,
     action,
     stack,
-  })
-    .finally(() => answerLanded(attempt, action))
-    .catch((rejection: unknown) => {
-      throw failure(rejection);
-    });
+  }).catch((rejection: unknown) => {
+    throw failure(rejection);
+  });
   return { attempt, report };
-}
-
-/**
- * Tells the log when a `run_local_eval` answer reached this window, by this window's clock, so a
- * stalled Start says whether the answer or the next call was held (`local_eval_answer_landed`).
- */
-function answerLanded(attempt: string, action: LocalAction): void {
-  invoke("local_eval_answer_landed", {
-    attempt,
-    action,
-    landedAtMs: Date.now(),
-  }).catch(() => {});
 }
 
 /** Lists recorded stacks, so a stack id comes from the CLI. Cancel it like any other call. */
@@ -299,8 +285,7 @@ export function podmanMachinePlan(
 
 /**
  * The person's yes: restart their Podman machine with the plan's CPUs and memory, and the
- * containers that were running in it, and wait until it can download. Rejects with
- * `{ said, resized }`: a plain sentence, and whether the machine is bigger and only not ready yet.
+ * containers that were running in it. Rejects with a plain sentence when it couldn't.
  */
 export function resizePodmanMachine(plan: PodmanPlan): Promise<void> {
   return invoke<void>("resize_podman_machine", {

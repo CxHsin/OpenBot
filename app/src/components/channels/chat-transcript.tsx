@@ -11,7 +11,6 @@ import {
   SHOW_APP_ACCESS_TOOL,
 } from "@openbot/shared/connect-prompt";
 import { answeredBy } from "@openbot/shared/handoff-markers";
-import { readBrief, readTaskReport } from "@openbot/shared/orchestration";
 import { SUBAGENT_TOOL } from "@openbot/shared/subagent";
 import {
   answersTheModel,
@@ -47,11 +46,6 @@ import {
   ArgumentsArrivingContext,
   TurnInFlightContext,
 } from "@/components/gallery/streaming";
-import {
-  MessageReactions,
-  SentFromBot,
-  TaskReport,
-} from "@/components/tasks/task-thread";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import {
   Dialog,
@@ -94,7 +88,7 @@ import {
 import {
   markdownComponents,
   markdownPlugins,
-  replyRemarkPluginsFor,
+  replyRemarkPlugins,
 } from "@/lib/markdown";
 import { EASE_OUT, ENTRANCE_SECONDS } from "@/lib/motion";
 import {
@@ -111,11 +105,6 @@ import {
   unofferedTool,
 } from "@/lib/plugins/tool-result";
 import { useResultVisibility } from "@/lib/product-telemetry";
-import {
-  NO_SLACK_NAMES,
-  type SlackNames,
-  slackNamesIn,
-} from "@/lib/slack/mentions";
 import { readTeamBotConsent } from "@/lib/team-bots";
 import { cn } from "@/lib/utils";
 import { VOICE_CHAT_ACTIVITY, type VoiceChatEntry } from "@/lib/voice/archive";
@@ -795,7 +784,6 @@ function ResponsibilityFiring({
 const TranscriptMessage = memo(function TranscriptMessage({
   commandLabels = "",
   role,
-  slackNames = NO_SLACK_NAMES,
   streaming = false,
   settled = true,
   text,
@@ -804,8 +792,6 @@ const TranscriptMessage = memo(function TranscriptMessage({
 }: {
   commandLabels?: string;
   role: "user" | "assistant";
-  /** The people and channels this conversation's Slack steps named, for mentions in the reply. */
-  slackNames?: SlackNames;
   threadId?: string;
   messageId: string;
   /* This is the Bot's reply still being written: the last row of a turn in flight. */
@@ -831,22 +817,6 @@ const TranscriptMessage = memo(function TranscriptMessage({
     !isUser && settled && revealed.trim().length > 0,
   );
   const firing = isUser ? readFiring(text) : null;
-  /*
-   * A task thread's first message is the Bot's brief, not something the person typed: drawn as sent
-   * from the Bot, without the words that frame it for the model. See `frameBrief`.
-   */
-  const brief = isUser ? readBrief(text) : null;
-  if (brief !== null) {
-    return (
-      <MessageRow align="end">
-        <MessageContent>
-          <Arriving>
-            <SentFromBot brief={brief} threadId={threadId} />
-          </Arriving>
-        </MessageContent>
-      </MessageRow>
-    );
-  }
   if (firing !== null) {
     return (
       <MessageRow align="start">
@@ -869,7 +839,6 @@ const TranscriptMessage = memo(function TranscriptMessage({
    * Bot saying something new. The id is what says whose it is; see `answerMessageId`.
    */
   const answerer = isUser ? null : answeredBy(messageId);
-  const report = isUser ? null : readTaskReport(messageId);
 
   return (
     <MessageRow
@@ -936,42 +905,18 @@ const TranscriptMessage = memo(function TranscriptMessage({
                  * closes them for the duration.
                  */
                 <div ref={resultRef}>
-                  {report ? (
-                    /*
-                     * A task the Bot handed out, saying how it went: its words, framed with the
-                     * task they are about and the way into its thread. See `taskReportMessageId`.
-                     */
-                    <TaskReport
-                      kind={report.kind}
-                      taskId={report.taskId}
-                      words={text}
-                    >
-                      <Streamdown
-                        components={markdownComponents}
-                        mode={mode}
-                        plugins={markdownPlugins}
-                        remarkPlugins={replyRemarkPluginsFor(slackNames)}
-                      >
-                        {revealed}
-                      </Streamdown>
-                    </TaskReport>
-                  ) : (
-                    <Streamdown
-                      components={markdownComponents}
-                      mode={mode}
-                      plugins={markdownPlugins}
-                      remarkPlugins={replyRemarkPluginsFor(slackNames)}
-                    >
-                      {revealed}
-                    </Streamdown>
-                  )}
+                  <Streamdown
+                    components={markdownComponents}
+                    mode={mode}
+                    plugins={markdownPlugins}
+                    remarkPlugins={replyRemarkPlugins}
+                  >
+                    {revealed}
+                  </Streamdown>
                 </div>
               )}
             </BubbleContent>
           </Bubble>
-          {isUser && threadId ? (
-            <MessageReactions messageId={messageId} threadId={threadId} />
-          ) : null}
         </Arriving>
       </MessageContent>
     </MessageRow>
@@ -2144,26 +2089,6 @@ export function ChatTranscript({
   const folders = foldersRef.current.names;
 
   /*
-   * The people and channels this conversation's Slack steps named, so a reply that quotes Slack's
-   * `<@U…>` shows "@Alex Clarke". Kept the same map while the names are the same, as the folders are,
-   * so a finished message is not drawn again.
-   */
-  const slackRef = useRef<{ key: string; names: SlackNames }>({
-    key: "",
-    names: NO_SLACK_NAMES,
-  });
-  const slackNamed = slackNamesIn(
-    visible.filter(
-      (item): item is Extract<typeof item, { kind: "tool" }> =>
-        item.kind === "tool",
-    ),
-  );
-  const slackKey = JSON.stringify([...slackNamed]);
-  if (slackKey !== slackRef.current.key)
-    slackRef.current = { key: slackKey, names: slackNamed };
-  const slackNames = slackRef.current.names;
-
-  /*
    * ONLY WHILE THERE IS NOTHING ELSE TO LOOK AT. Once a reply starts streaming, or a tool line
    * appears, the transcript is already saying the Bot is working — a second indicator under a
    * half-written answer would claim it had stopped and started again.
@@ -2508,7 +2433,6 @@ export function ChatTranscript({
           settled={!busy || index < turnStart}
           commandLabels={commandLabels}
           role={item.role}
-          slackNames={slackNames}
           streaming={
             busy && item.role === "assistant" && index === items.length - 1
           }

@@ -24,7 +24,6 @@ import {
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { queryClient } from "@/query-client";
 import { LearningPage, runPollInterval } from "@/routes/_authed/admin/learning";
-import { answerBotsList } from "./bots-api";
 
 beforeAll(() => GlobalRegistrator.register());
 afterAll(() => GlobalRegistrator.unregister());
@@ -67,8 +66,7 @@ test("an administrator excludes a Bot and saves without losing the default or pa
         }
         return Response.json({ settings });
       }
-      const bots = answerBotsList(input, init, { visible: [] });
-      if (bots) return bots;
+      if (path.includes("/api/agents")) return Response.json({ agents: [] });
       return Response.json(
         { error: "Learning in the backend is unavailable." },
         { status: 502 },
@@ -128,17 +126,16 @@ test("active and hidden Bots both have participation controls", async () => {
     mine: false,
   });
   global.fetch = Object.assign(
-    async (input: RequestInfo | URL, init?: RequestInit) => {
+    async (input: RequestInfo | URL) => {
       const path = String(input);
       if (path.endsWith("/settings"))
         return Response.json({
           settings: { enabled: false, defaultTarget: null, agents: {} },
         });
-      const bots = answerBotsList(input, init, {
-        visible: [bot("active-bot")],
-        hidden: [bot("hidden-bot")],
-      });
-      if (bots) return bots;
+      if (path === "/api/agents?hidden=true")
+        return Response.json({ agents: [bot("hidden-bot")] });
+      if (path === "/api/agents")
+        return Response.json({ agents: [bot("active-bot")] });
       return Response.json({ error: "Unavailable" }, { status: 502 });
     },
     { preconnect: originalFetch.preconnect },
@@ -150,11 +147,10 @@ test("active and hidden Bots both have participation controls", async () => {
 
 function serve(body: unknown) {
   global.fetch = Object.assign(
-    async (input: RequestInfo | URL, init?: RequestInit) => {
+    async (input: RequestInfo | URL) => {
       const path = String(input);
       if (path.endsWith("/settings")) return Response.json(body);
-      const bots = answerBotsList(input, init, { visible: [] });
-      if (bots) return bots;
+      if (path.includes("/api/agents")) return Response.json({ agents: [] });
       return Response.json({ error: "unavailable" }, { status: 502 });
     },
     { preconnect: originalFetch.preconnect },
@@ -247,8 +243,7 @@ test("a missing container shows exactly what to run, and a Create button only wh
                   canCreate: true,
                 },
         });
-      const bots = answerBotsList(input, init, { visible: [] });
-      if (bots) return bots;
+      if (path.includes("/api/agents")) return Response.json({ agents: [] });
       return Response.json({ error: "unavailable" }, { status: 502 });
     },
     { preconnect: originalFetch.preconnect },
@@ -370,8 +365,7 @@ describe("reviewing proposed skills", () => {
             },
             automatic: { state: "saved" },
           });
-        const bots = answerBotsList(input, init, { visible: [] });
-        if (bots) return bots;
+        if (path.includes("/api/agents")) return Response.json({ agents: [] });
         if (path === "/api/admin/learning/people/proposals")
           return Response.json({
             people: [

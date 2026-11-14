@@ -33,7 +33,6 @@ import {
   ISOLATION_UNAVAILABLE,
 } from "@/lib/agents/isolation";
 import { deploymentKeys } from "@/lib/deployment/queries";
-import { BOTS_PATH } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /*
@@ -119,9 +118,9 @@ beforeEach(() => {
         dialled.push(body.endpoint);
         return Response.json(verdict);
       }
-      if (path === BOTS_PATH && init?.method === "POST") {
+      if (path === "/api/agents" && init?.method === "POST") {
         creates.push(body);
-        return Response.json({ bot: { id: "agent_new" } }, { status: 201 });
+        return Response.json({ agent: { id: "agent_new" } }, { status: 201 });
       }
       if (path === "/api/plugins/giveable")
         return Response.json({ apps: giveable });

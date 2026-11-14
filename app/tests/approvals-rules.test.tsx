@@ -32,7 +32,6 @@ import {
 } from "@/components/channels/tool-activity";
 import { TeamBotConsents } from "@/components/settings/team-bot-consents";
 import { deploymentKeys } from "@/lib/deployment/queries";
-import { answerBotsList } from "./bots-api";
 
 beforeAll(() => GlobalRegistrator.register());
 afterEach(cleanup);
@@ -125,10 +124,8 @@ beforeEach(() => {
       }
       if (url === "/api/approvals")
         return Response.json({ ...inbox, ...inboxOverride });
-      const bots = answerBotsList(path, init, {
-        visible: [{ id: "shopper-bot", name: "Shop" }],
-      });
-      if (bots) return bots;
+      if (url.startsWith("/api/agents"))
+        return Response.json({ agents: [{ id: "shopper-bot", name: "Shop" }] });
       if (url === "/api/me")
         return Response.json({
           user: { id: "me", email: "me@example.test", role },

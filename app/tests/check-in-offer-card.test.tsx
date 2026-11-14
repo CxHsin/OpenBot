@@ -12,7 +12,6 @@ import {
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { ActiveBotProvider, useActiveBot } from "@/lib/copilot/active-bot";
 import { CheckInOfferCard } from "@/lib/copilot/check-in-offer-tool";
-import { botPath } from "./bots-api";
 import { settleReactWork } from "./settle-react-work";
 
 /**
@@ -57,9 +56,9 @@ function drawn(
         settings: options.settings ?? [],
         allowed: options.allowed ?? true,
       });
-    if (url === botPath("assistant"))
+    if (url === "/api/agents/assistant")
       return Response.json({
-        bot: { id: "assistant", name: "Personal Assistant" },
+        agent: { id: "assistant", name: "Personal Assistant" },
       });
     return Response.json({});
   }) as unknown as typeof fetch;

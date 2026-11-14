@@ -112,7 +112,7 @@ test("the big downloads start when the first screen shows, before Install is cli
   await act(async () => {
     view = render(<App />);
   });
-  await view.findByRole("heading", { name: "Set up OpenBot" });
+  await view.findByRole("heading", { name: "Set up OpenBot (self-contained)" });
 
   // Nothing was clicked: the first screen alone started them, for the installation's folder.
   expect(called("start_early_downloads")).toEqual([
@@ -188,7 +188,7 @@ test("a disk too full to download to says what is free and what is needed, and I
   await act(async () => {
     view = render(<App />);
   });
-  await view.findByRole("heading", { name: "Set up OpenBot" });
+  await view.findByRole("heading", { name: "Set up OpenBot (self-contained)" });
   await said(WINDOWS_F_SHORT);
   const line = view.getByRole("status");
   // Each figure and its unit are kept on one line.
@@ -205,7 +205,9 @@ test("a disk too full to download to says what is free and what is needed, and I
   expect(install.disabled).toBe(true);
   await userEvent.click(install);
   expect(called("prepare_installation")).toEqual([]);
-  expect(view.getByRole("heading", { name: "Set up OpenBot" })).toBeTruthy();
+  expect(
+    view.getByRole("heading", { name: "Set up OpenBot (self-contained)" }),
+  ).toBeTruthy();
   // Space was freed: the download starts by itself, and Install is there again.
   await said({ state: "downloading", bytes: 0 });
   expect(install.disabled).toBe(false);
@@ -222,7 +224,7 @@ test("an Install pressed before the disk is looked at builds nothing on a disk t
   await act(async () => {
     view = render(<App />);
   });
-  await view.findByRole("heading", { name: "Set up OpenBot" });
+  await view.findByRole("heading", { name: "Set up OpenBot (self-contained)" });
   const install = view.getByRole("button", {
     name: "Install",
   }) as HTMLButtonElement;
@@ -236,7 +238,9 @@ test("an Install pressed before the disk is looked at builds nothing on a disk t
     looked(WINDOWS_F_SHORT);
   });
   expect(called("prepare_installation")).toEqual([]);
-  expect(view.getByRole("heading", { name: "Set up OpenBot" })).toBeTruthy();
+  expect(
+    view.getByRole("heading", { name: "Set up OpenBot (self-contained)" }),
+  ).toBeTruthy();
   expect(
     view.getByRole("status").textContent?.replaceAll("\u00a0", " "),
   ).toContain("This computer has 15 GB of free space");

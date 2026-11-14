@@ -15,7 +15,6 @@ import {
 } from "@/lib/channels/queries";
 import { UNANSWERED } from "@/lib/copilot/repair-history";
 import { queryClient } from "@/query-client";
-import { answerBotsList, botPath } from "./bots-api";
 import {
   ANSWERED_EARLY,
   answerOf,
@@ -76,13 +75,13 @@ beforeAll(() => {
             : input.url,
         "http://localhost",
       );
-      const bots = answerBotsList(url, init, { visible: [] });
-      if (bots) return bots;
+      if (url.pathname === "/api/agents")
+        return NativeResponse.json({ agents: [] });
       if (url.pathname === `/api/plugins/for/${BOT}`)
         return NativeResponse.json({ skills: [], tools: [] });
-      if (url.pathname === botPath(BOT))
+      if (url.pathname === `/api/agents/${BOT}`)
         return NativeResponse.json({
-          bot: { id: BOT, visibility: "public", canManage: true },
+          agent: { id: BOT, visibility: "public", canManage: true },
         });
       if (url.pathname === `/api/components/for-agent/${BOT}`)
         return NativeResponse.json({ components: [] });

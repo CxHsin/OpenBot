@@ -44,13 +44,6 @@ import {
   type PluginsProvider,
 } from "@/lib/plugins/provider-vocabulary";
 import { brokeredAccountsQueryOptions } from "@/lib/plugins/queries";
-import { readableRefusal } from "@/lib/plugins/readable-refusal";
-
-/** What a failed key check says when the server's own sentence cannot be shown. */
-const KEY_CHECK_FAILED =
-  "That key didn't pass its check. Disconnect, then connect again with a new key, or press Re-check.";
-const RECHECK_FAILED =
-  "That key didn't pass its check. Press Re-check again in a few minutes.";
 
 /**
  * One person's own brokered account, on whichever screen is asking.
@@ -422,8 +415,7 @@ export function useBrokeredAccount(input: {
    */
   const recheck = useMutation({
     ...recheckBrokeredConnectionMutationOptions(queryClient),
-    onError: (thrown: Error) =>
-      report(readableRefusal(thrown.message, RECHECK_FAILED)),
+    onError: (thrown: Error) => report(thrown.message),
   });
   /*
    * The check's answer is thrown away whenever an action changes the account it was about.
@@ -593,7 +585,7 @@ export function useBrokeredAccount(input: {
   const submission = useMutation({
     ...connectBrokeredWithFieldsMutationOptions(queryClient),
     onError: (thrown: Error) => {
-      report(readableRefusal(thrown.message, KEY_CHECK_FAILED));
+      report(thrown.message);
       forgetAnswers();
     },
     onSuccess: forgetAnswers,

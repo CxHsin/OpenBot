@@ -17,7 +17,7 @@ import {
   type RunCli,
   runCli,
   verifiedContainer,
-} from "./learning-container";
+} from "../server/src/learning/ensure-container";
 import { intelligenceApiKey } from "../shared/intelligence-key";
 import {
   intelligenceApiOrigin,
@@ -25,7 +25,7 @@ import {
   setupSelfHostedLearning,
 } from "./self-hosted-learning";
 
-export type { KeyIntelligence } from "./learning-container";
+export type { KeyIntelligence } from "../server/src/learning/ensure-container";
 
 const CONTAINER = "CPK_INTELLIGENCE_LEARNING_CONTAINER_ID";
 
