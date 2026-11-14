@@ -20,7 +20,7 @@ and changed.
 
 ## Decision
 
-OpenBot is the base. DS-Bot stays in `_ref/` as a reference for product decisions, not code.
+OpenBot is the base. DS-Bot stays outside this repository in the reference checkout as a reference for product decisions, not code.
 
 ## Why
 

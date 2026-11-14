@@ -123,7 +123,6 @@ import {
   type PersonalSkillSources,
 } from "./learning/runtime";
 import type { LearningSettingsStore } from "./learning/settings";
-import { measuredModel, modelMeasurementEnabled } from "./measurement/model";
 import {
   type LoadPersonalMemory,
   PersonalMemoryMiddleware,
@@ -422,8 +421,6 @@ export type RuntimeModel = {
   provider: "openai" | "anthropic";
   defaultModel: string;
   plan?: PlanModelConfig;
-  /** Replay complete Responses inputs for a relay that cannot resolve stored item references. */
-  openaiStateless?: true;
   /** How hard this run thinks, only ever one the model takes. Absent: the model's own default. */
   effort?: string;
   /** Whether `defaultModel` came from the provider's listing rather than configuration. */
@@ -497,20 +494,10 @@ export function runtimeModelForEnvironment(
    * person chose), so set means chosen, and the model list keeps it as the default while the
    * credential lists it (`model-catalogue.ts`).
    */
-  const stateless =
-    provider === "openai" && environment.OPENBOT_OPENAI_STATELESS === "true"
-      ? { openaiStateless: true as const }
-      : {};
   const plan = planModelForEnvironment(environment);
   if (selectedModel)
-    return {
-      ...stateless,
-      provider,
-      plan,
-      defaultModel: selectedModel,
-      pinned: true,
-    };
-  return { ...stateless, provider, plan, defaultModel };
+    return { provider, plan, defaultModel: selectedModel, pinned: true };
+  return { provider, plan, defaultModel };
 }
 
 /**
@@ -786,19 +773,7 @@ export function builtInAgentConfiguration(
   ];
 
   return {
-    model: (() => {
-      const selected =
-        wrapped ?? planModel ?? `${model.provider}/${model.defaultModel}`;
-      if (!modelMeasurementEnabled()) return selected;
-      const resolved =
-        typeof selected === "string"
-          ? resolveModel(selected, apiKey ?? undefined)
-          : selected;
-      return typeof resolved !== "string" &&
-        resolved.specificationVersion === "v3"
-        ? measuredModel(resolved)
-        : resolved;
-    })(),
+    model: wrapped ?? planModel ?? `${model.provider}/${model.defaultModel}`,
     /*
      * Tagged sections in a fixed order: who it is, its role, the person's own instructions, the
      * working rules every Bot gets, what this Bot holds, its computer, its learned skills, then
@@ -884,20 +859,8 @@ export function builtInAgentConfiguration(
     ...(planModel ? {} : { apiKey: apiKey ?? undefined }),
     // The run's thinking effort, when the person picked one the model takes. A plan's harness is
     // told through its own run instead (`planChoice`).
-    ...(!planModel && (effortProviderOptions(model) || model.openaiStateless)
-      ? {
-          providerOptions: {
-            ...effortProviderOptions(model),
-            ...(model.provider === "openai" && model.openaiStateless
-              ? {
-                  openai: {
-                    ...effortProviderOptions(model)?.openai,
-                    store: false,
-                  },
-                }
-              : {}),
-          },
-        }
+    ...(!planModel && effortProviderOptions(model)
+      ? { providerOptions: effortProviderOptions(model) }
       : {}),
     /*
      * A run stops after one step unless told otherwise, which for a Bot with tools means it calls

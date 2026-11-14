@@ -1,7 +1,6 @@
 # 本地开发
 
-安装依赖、启动服务或遇到 Windows 环境失败时阅读。历史测试结果见
-[本地开发历史](../local-development.md)，不能替代本次验证。
+安装依赖、启动服务或遇到 Windows 环境失败时阅读。历史结果不能替代本次验证。
 
 ## 工具和依赖
 
@@ -75,10 +74,10 @@ try {
 Windows 默认 bash 可能指向 WSL，先确认实际 shell。电脑上使用
 `OPENBOT_ONE_COMPUTER_EACH=false` 共享 computer。`bun run dev` 仅启动 app/API，
 不等于完整后台执行栈。通用服务与迁移命令见[上游开发说明](../development.md)。
-Telegram 配置和长轮询限制见 [Telegram](../telegram.md)。
+
 
 ## 环境失败与验证
 
 验证入口见 [verification](verification.md)。缺独立依赖、数据库、POSIX 路径假设或语言断言
-曾导致 Windows 测试失败；具体记录见[历史限制](../local-development.md#剩余测试失败的证据与限制)。
+曾导致 Windows 测试失败。
 这些是历史诊断，不自动豁免本次失败；先定向复现并判断原因。

@@ -56,7 +56,7 @@ export const updateRoutingPreferences = pgTable(
       .notNull(),
     transports: text("transports")
       .array()
-      .$type<("slack" | "teams" | "sms" | "push" | "telegram")[]>()
+      .$type<("slack" | "teams" | "sms" | "push")[]>()
       .notNull()
       .default([]),
     updatedAt: timestamp("updated_at", { withTimezone: true })

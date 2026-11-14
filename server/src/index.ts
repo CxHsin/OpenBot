@@ -17,7 +17,6 @@ import {
   guardHostAccess,
   installEnterpriseControls,
   proactiveAdmin,
-  recordHeadlessUsage,
   skillSharingAllowed,
   skillSharingInSnapshot,
 } from "./admin/controls";
@@ -175,7 +174,6 @@ import { createDeliveryRouter, DELIVERY_WORK_KINDS } from "./delivery/router";
 import { configuredDeliveryProviders } from "./delivery/routes";
 import { createDeliveryScopes } from "./delivery/scope";
 import { createDeliveryStore } from "./delivery/store";
-import { createTelegramIngress } from "./delivery/telegram-ingress";
 import type { DeliveryScope } from "./delivery/types";
 import { DeliveryRefusedError } from "./delivery/types";
 import { currentEdition, editionHasMemory, setEdition } from "./edition";
@@ -231,7 +229,6 @@ import {
   createLearningSharingStore,
   createOpenSkillIndex,
 } from "./learning/sharing";
-import { configureModelMeasurement, measureTurns } from "./measurement/model";
 import { createMemoryDefaults } from "./memory/defaults";
 import { createMemoryIngestion } from "./memory/ingestion";
 import { createIntelligenceMemory } from "./memory/intelligence";
@@ -336,8 +333,6 @@ import {
   createSkillChooser,
   routingModelFor,
 } from "./routing/model";
-import { createRoutineWork } from "./scheduling/routine-work";
-import { createTurnScheduling } from "./scheduling/turns";
 import { createSelfHostBanner } from "./self-host-banner";
 import { createSetupSources, modelKeyOf } from "./setup/checklist";
 import { createComputerCheck } from "./setup/computer-check";
@@ -707,21 +702,6 @@ const policyListener = await startPolicyListener(
  * unavailable, and the row is a note for a reader rather than something the server depends on.
  */
 const bootAuditStore = createAuditStore(database);
-configureModelMeasurement(async (measurement) => {
-  if (measurement.request === 1) await recordHeadlessUsage(measurement);
-  const { ownerUserId, agentId, initiator, ...payload } = measurement;
-  await recordAuditEvent(bootAuditStore, {
-    actorUserId: ownerUserId,
-    initiator,
-    eventType:
-      measurement.status === "completed"
-        ? "model.request_completed"
-        : "model.request_failed",
-    targetType: "agent",
-    targetId: agentId,
-    payload,
-  });
-});
 // The gallery every headless turn offers its Bot, refusals written to the same trail.
 const componentCatalog = headlessComponentCatalog({
   store: componentStore,
@@ -2153,63 +2133,37 @@ const routineAgentRunner = new IntelligenceAgentRunner({
   authToken: routineIntelligence.ɵgetRunnerAuthToken(),
 });
 
-const turnScheduling = createTurnScheduling({
-  defer: (input, id) => routineWork.defer(input, id),
-});
-const routineWork = createRoutineWork({
-  database,
-  auditStore: bootAuditStore,
-  owner: workOwner("routine-resume"),
-  routines: routineStore,
-  personIsActive: turnScheduling.personIsActive,
-});
 const routineRunner = createRoutineRunner({
   routineStore,
   channelStore,
-  aroundTurn: (id, input, run) =>
-    turnScheduling.routine(
-      { ...input, runId: input.runId ?? crypto.randomUUID() },
-      id,
-      run,
-    ),
-  runTurn: measureTurns(
-    createTurnRunner({
-      prepareRunInput: prepareProductRunInput,
-      onKnownStop: productTelemetry.stopKnown,
-      admission: serverTurnAdmission,
-      intelligence: routineIntelligence,
-      runner: routineAgentRunner,
-      components: componentCatalog,
-      buildAgentFor,
-      toolsForTurn: async ({ ownerUserId, agentId, initiator }) => {
-        if (!computerGateway) return [];
-        const actor = await actorFor(ownerUserId);
-        const profile = await agentProfileStore.get(actor, agentId);
-        if (!profile)
-          throw new Error("That Bot is not available to this owner.");
-        // A Team Bot's teammate uses the Bot, not its owner's signed-in computer.
-        if (!canUseComputer(profile, actor)) return [];
-        return createHeadlessComputerTools({
-          gateway: computerGateway,
-          seat: await computerGateway.seatFor(agentId, actor.id),
-          actor: { id: actor.id, userId: actor.id, initiator },
-          auditStore: bootAuditStore,
-          ...(signInService ? { signIn: signInService } : {}),
-        });
-      },
-      learningContainerForThread: (input) =>
-        copilotRuntime.learning?.containerForThread(input) ??
-        Promise.resolve(undefined),
-    }),
-  ),
+  runTurn: createTurnRunner({
+    prepareRunInput: prepareProductRunInput,
+    onKnownStop: productTelemetry.stopKnown,
+    admission: serverTurnAdmission,
+    intelligence: routineIntelligence,
+    runner: routineAgentRunner,
+    components: componentCatalog,
+    buildAgentFor,
+    toolsForTurn: async ({ ownerUserId, agentId, initiator }) => {
+      if (!computerGateway) return [];
+      const actor = await actorFor(ownerUserId);
+      const profile = await agentProfileStore.get(actor, agentId);
+      if (!profile) throw new Error("That Bot is not available to this owner.");
+      // A Team Bot's teammate uses the Bot, not its owner's signed-in computer.
+      if (!canUseComputer(profile, actor)) return [];
+      return createHeadlessComputerTools({
+        gateway: computerGateway,
+        seat: await computerGateway.seatFor(agentId, actor.id),
+        actor: { id: actor.id, userId: actor.id, initiator },
+        auditStore: bootAuditStore,
+        ...(signInService ? { signIn: signInService } : {}),
+      });
+    },
+    learningContainerForThread: (input) =>
+      copilotRuntime.learning?.containerForThread(input) ??
+      Promise.resolve(undefined),
+  }),
 });
-const routineResumeSweep = repeatAfterEach(async () => {
-  try {
-    await routineWork.sweep(routineRunner);
-  } catch {
-    console.error(JSON.stringify({ type: "routine-resume-sweep-failed" }));
-  }
-}, 2_000);
 
 /**
  * Subagents: every Bot's way to give part of its work to a fresh run of itself (agents/subagent.ts).
@@ -2487,22 +2441,20 @@ const executeApprovedAction = createApprovedActionExecutor({
   refusalMarker: REFUSAL_MARKER,
   personInitiator: PERSON_INITIATOR,
 });
-const approvalContinuationRunner = measureTurns(
-  createTurnRunner({
-    prepareRunInput: prepareProductRunInput,
-    onKnownStop: productTelemetry.stopKnown,
-    admission: serverTurnAdmission,
-    intelligence: routineIntelligence,
-    runner: routineAgentRunner,
-    components: componentCatalog,
-    buildAgentFor,
-    toolsForTurn: async ({ ownerUserId, agentId, initiator }) =>
-      approvalComputerTools(ownerUserId, agentId, initiator),
-    learningContainerForThread: (input) =>
-      copilotRuntime.learning?.containerForThread(input) ??
-      Promise.resolve(undefined),
-  }),
-);
+const approvalContinuationRunner = createTurnRunner({
+  prepareRunInput: prepareProductRunInput,
+  onKnownStop: productTelemetry.stopKnown,
+  admission: serverTurnAdmission,
+  intelligence: routineIntelligence,
+  runner: routineAgentRunner,
+  components: componentCatalog,
+  buildAgentFor,
+  toolsForTurn: async ({ ownerUserId, agentId, initiator }) =>
+    approvalComputerTools(ownerUserId, agentId, initiator),
+  learningContainerForThread: (input) =>
+    copilotRuntime.learning?.containerForThread(input) ??
+    Promise.resolve(undefined),
+});
 /**
  * Conversations with several Bots. Each Bot turn is an ordinary headless AG-UI turn into that Bot's
  * own group thread, built exactly as a routine's is, so governance, learning and the computer tools
@@ -2636,25 +2588,22 @@ const deliveryRouter = createDeliveryRouter({
     );
     await channelStore.signalBusy(input.threadId, true);
     try {
-      const result = await turnScheduling.person(
-        {
-          ownerUserId: input.ownerUserId,
-          routineId: `delivery:${input.runId}`,
-          runId: input.runId,
-          agentId: input.agentId,
-          threadId: input.threadId,
-          instruction: input.text,
-          userMessage: {
-            id: `delivery:${input.runId}`,
-            role: "user",
-            content: input.text,
-          },
-          initiator: PERSON_INITIATOR,
-          telemetry: deliveryLineage(input.source, input.runId),
-          signal: input.signal,
+      const result = await approvalContinuationRunner({
+        ownerUserId: input.ownerUserId,
+        routineId: `delivery:${input.runId}`,
+        runId: input.runId,
+        agentId: input.agentId,
+        threadId: input.threadId,
+        instruction: input.text,
+        userMessage: {
+          id: `delivery:${input.runId}`,
+          role: "user",
+          content: input.text,
         },
-        approvalContinuationRunner,
-      );
+        initiator: PERSON_INITIATOR,
+        telemetry: deliveryLineage(input.source, input.runId),
+        signal: input.signal,
+      });
       if (result.replyText)
         await channelStore.recordActivity(
           actor,
@@ -2851,35 +2800,6 @@ const deliverySweeps = DELIVERY_WORK_KINDS.map((kind) =>
     }
   }, 2_000),
 );
-
-// One polling server per Telegram token. Inbox/outbox execution remains on the leased queue.
-const telegramAbort = new AbortController();
-const telegramIngress = deliveryProviders.telegram
-  ? createTelegramIngress({
-      transport: deliveryProviders.telegram,
-      store: deliveryStore,
-      router: deliveryRouter,
-      scopeFor: deliveryScopeFor,
-    })
-  : undefined;
-const telegramSweep = telegramIngress
-  ? repeatAfterEach(async () => {
-      try {
-        await telegramIngress.poll(telegramAbort.signal);
-      } catch (error) {
-        if (!telegramAbort.signal.aborted)
-          console.error(
-            JSON.stringify({
-              type: "telegram-poll-error",
-              code:
-                error instanceof Error && "code" in error
-                  ? error.code
-                  : "unavailable",
-            }),
-          );
-      }
-    }, 2_000)
-  : undefined;
 
 const personResponseOwner = workOwner("person-response");
 const groupSweep = repeatAfterEach(async () => {
@@ -3389,7 +3309,6 @@ const app = createApp(
         slack: deliveryProviders.slack,
         twilio: deliveryProviders.sms,
         pushProjectId: deliveryProviders.pushProjectId,
-        telegram: deliveryProviders.telegram,
       },
       webhooks: {
         store: deliveryStore,
@@ -3489,7 +3408,6 @@ if (config.singleUser) {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     responsibilitySweep.stop();
-    routineResumeSweep.stop();
     wakeUpSweep.stop();
     wakeUpReaper.stop();
     memorySweep.stop();
@@ -3502,8 +3420,6 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     if (firstAutoApproveSweep) clearTimeout(firstAutoApproveSweep);
     if (autoApproveTimer) clearInterval(autoApproveTimer);
     for (const sweep of deliverySweeps) sweep.stop();
-    telegramSweep?.stop();
-    telegramAbort.abort();
     void Promise.allSettled([
       productTelemetry.flush(),
       channelActivityListener.stop(),

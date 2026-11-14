@@ -37,7 +37,6 @@ import { currentApprovalContext } from "../approvals/types";
 import type { AuditInitiator } from "../audit";
 import type { ProductSurface } from "../telemetry/product";
 import { REFUSAL_MARKER } from "../plugins/tools";
-import { withoutTurnScheduling } from "../scheduling/turns";
 
 const parameters = z.object({
   task: z
@@ -180,30 +179,28 @@ export function createSubagents(options: {
           const messages = () => agent?.messages ?? [];
           const answer = (result: SubagentResult) => JSON.stringify(result);
           try {
-            const { replyText } = await withoutTurnScheduling(() =>
-              runTurn({
-                ownerUserId: parent.actorId,
-                telemetry: {
-                  trigger: "subagent",
-                  surface: parent.surface,
-                  parentRunId: parent.runId,
-                  inheritedRootTaskId: parent.rootTaskId,
-                },
-                routineId: SUBAGENT_TOOL,
-                agentId: parent.botId,
-                threadId,
-                runId,
-                instruction: parsed.data.task,
-                userMessage: {
-                  id: crypto.randomUUID(),
-                  role: "user",
-                  content: framed(parsed.data.task, parsed.data.answer),
-                },
-                initiator: parent.initiator,
-                depth: (parent.depth ?? 0) + 1,
-                ...(execution?.signal ? { signal: execution.signal } : {}),
-              }),
-            );
+            const { replyText } = await runTurn({
+              ownerUserId: parent.actorId,
+              telemetry: {
+                trigger: "subagent",
+                surface: parent.surface,
+                parentRunId: parent.runId,
+                inheritedRootTaskId: parent.rootTaskId,
+              },
+              routineId: SUBAGENT_TOOL,
+              agentId: parent.botId,
+              threadId,
+              runId,
+              instruction: parsed.data.task,
+              userMessage: {
+                id: crypto.randomUUID(),
+                role: "user",
+                content: framed(parsed.data.task, parsed.data.answer),
+              },
+              initiator: parent.initiator,
+              depth: (parent.depth ?? 0) + 1,
+              ...(execution?.signal ? { signal: execution.signal } : {}),
+            });
             return answer({
               answer: replyText,
               threadId,

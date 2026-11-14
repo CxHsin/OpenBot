@@ -4,6 +4,7 @@
 
 | 任务 | 阅读入口 | 内容 |
 | --- | --- | --- |
+| 理解当前 checkout 与上游差异 | [repo-state](repo-state.md) | 固定基线、保留的功能改动与阅读顺序 |
 | 提 Issue、PR 或协作交付 | [contributing](contributing.md) | 模板、证据、标签与交付边界 |
 | 配置环境、启动或排障 | [local](local.md) | 独立依赖、测试库、Windows 限制 |
 | 选择测试、验证与交付 | [verification](verification.md) | 检查顺序、证据与失败处理 |

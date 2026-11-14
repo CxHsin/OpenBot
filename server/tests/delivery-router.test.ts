@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import type { DrawnComponent } from "@openbot/toolkit/run-turn";
 import { createDeliveryRouter } from "../src/delivery/router";
 import {
   type DeliveryBinding,
@@ -26,7 +25,6 @@ const binding: DeliveryBinding = {
 function fixture(
   override: Partial<DeliveryBinding> = {},
   turnHook?: (router: ReturnType<typeof createDeliveryRouter>) => Promise<void>,
-  turnResult?: { replyText: string; components?: DrawnComponent[] },
 ) {
   const ownedBinding = { ...binding, ...override };
   const inbox: DeliveryInbox = {
@@ -130,7 +128,7 @@ function fixture(
     runTurn: async (input) => {
       calls.push(input);
       await turnHook?.(router);
-      return turnResult ?? { replyText: "Reply" };
+      return { replyText: "Reply" };
     },
     providers: {
       slack: {
@@ -155,32 +153,6 @@ function fixture(
     },
   };
 }
-test("a durable inbox batch becomes one ordered turn and one reply", async () => {
-  const f = fixture();
-  f.inbox.text = "Look at this post and tell me what to reply.";
-  const statuses: unknown[] = [];
-  Object.assign(f.store, {
-    startInboxBatch: async () => [
-      f.inbox,
-      { ...f.inbox, id: "amendment", text: "Actually, Thursday is fine." },
-    ],
-    setInboxBatch: async (id: string, state: string) => {
-      statuses.push({ id, state });
-    },
-  });
-  await f.router.sweep("delivery.inbound");
-  const turns = f.calls.filter(
-    (call) => !!call && typeof call === "object" && "runId" in call,
-  );
-  expect(turns).toHaveLength(1);
-  expect(turns[0]).toMatchObject({
-    runId: "in",
-    text: "Look at this post and tell me what to reply.\n\nActually, Thursday is fine.",
-  });
-  expect(statuses).toEqual([{ id: "in", state: "sent" }]);
-  expect(f.offered).toHaveLength(1);
-});
-
 test("verified identity resolves canonical scope and suppresses echoes", async () => {
   const f = fixture();
   expect(
@@ -222,56 +194,6 @@ test("queue invokes selected Bot and original conversation, emits durable async 
   });
   expect(f.statuses.at(-1)).toMatchObject({ state: "sent" });
 });
-
-test("queued Telegram reply includes the table data instead of only saying see the table", async () => {
-  const f = fixture({ transport: "telegram" }, undefined, {
-    replyText: "前三条新闻见表格。",
-    components: [
-      {
-        name: "showTable",
-        args: {
-          title: "Hacker News 首页前三条",
-          caption: "来源：https://news.ycombinator.com/",
-          columns: ["排名", "中文标题", "原标题"],
-          rows: [
-            { cells: [1, "Libghostty 1.0", "Libghostty 1.0"] },
-            { cells: [2, "上传你的内存", "Upload Your RAM"] },
-            {
-              cells: [
-                3,
-                "每台 Mac 都自带家庭成员分类器",
-                "Every Mac comes with a family member classifier",
-              ],
-            },
-          ],
-        },
-      },
-    ],
-  });
-  await f.router.sweep("delivery.inbound");
-  const offered = f.offered[0] as { transport: string; text: string };
-  expect(offered.transport).toBe("telegram");
-  expect(offered.text).toContain("原标题: Upload Your RAM");
-  expect(offered.text).toContain("排名: 3");
-  expect(offered.text).toContain("来源：https://news.ycombinator.com/");
-});
-
-test("a component-only queued result is still sent", async () => {
-  const f = fixture({ transport: "telegram" }, undefined, {
-    replyText: "",
-    components: [
-      {
-        name: "showNotice",
-        args: { title: "结果", body: "已完成检查", points: ["第一项通过"] },
-      },
-    ],
-  });
-  await f.router.sweep("delivery.inbound");
-  expect(f.offered[0]).toMatchObject({
-    text: expect.stringContaining("已完成检查"),
-  });
-});
-
 test("a turn knows where its message was written, so its surface can be told", async () => {
   const queued = fixture();
   await queued.router.sweep("delivery.inbound");

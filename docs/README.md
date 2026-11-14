@@ -2,6 +2,7 @@
 
 ## Fork entry
 
+- Understanding this checkout: [Repository state](dev/repo-state.md) for the upstream baseline, remaining fork changes and reading order.
 - Planning a feature: [Product](product.md) for value and scope, then [Design](design.md) for system boundaries.
 - Changing code: [Development index](dev/README.md) for the relevant domain, constraints and tests.
 - Understanding an important choice: [Decisions](decisions/README.md). ADRs explain why; current behavior lives in design/domain docs.

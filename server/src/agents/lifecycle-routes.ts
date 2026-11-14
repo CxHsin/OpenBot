@@ -183,7 +183,7 @@ export function createBotLifecycleRoutes(
           : null;
     if (value === null)
       return context.json(
-        { error: `Choose ${UPDATE_TRANSPORTS.join(", ")}, or all of them.` },
+        { error: "Choose slack, sms and push, or all of them." },
         400,
       );
     await lifecycle.setRouting(context.var.actor.id, kind, value);

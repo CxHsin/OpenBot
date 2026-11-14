@@ -12,7 +12,6 @@ import {
 import { createExpoPushTransport } from "./push";
 import type { DeliveryRouter } from "./router";
 import type { DeliveryStore } from "./store";
-import { createTelegramTransport, type TelegramTransport } from "./telegram";
 import {
   createTwilioTransport,
   smsOptKeyword,
@@ -88,7 +87,6 @@ export function createDeliveryRoutes(deps: {
   slack?: OpenTagTransport;
   twilio?: TwilioTransport;
   pushProjectId?: string;
-  telegram?: TelegramTransport;
 }) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", deps.requireUser, bodyLimit({ maxSize: 64 * 1024 }));
@@ -105,7 +103,6 @@ export function createDeliveryRoutes(deps: {
         teams: Boolean(deps.slack),
         sms: Boolean(deps.twilio),
         push: Boolean(deps.pushProjectId),
-        telegram: Boolean(deps.telegram),
       },
     }),
   );
@@ -142,23 +139,6 @@ export function createDeliveryRoutes(deps: {
   routes.post("/opentag/start", (c) => startChatLink(c));
   routes.post("/slack/start", (c) => startChatLink(c, "slack"));
   routes.post("/teams/start", (c) => startChatLink(c, "teams"));
-  routes.post("/telegram/start", async (c) => {
-    if (!deps.telegram)
-      throw new DeliveryRefusedError(
-        "Telegram is not configured on this deployment.",
-      );
-    const target = targetSchema.parse(await c.req.json());
-    const scope = await ownedScope(deps.scopeFor, c.var.actor.id, target);
-    const bot = await deps.telegram.bot();
-    const code = await deps.store.challenge(scope, "telegram", null);
-    return c.json({
-      platform: "telegram",
-      code,
-      url: `https://t.me/${bot.username}?start=${code}`,
-      command: `/start ${code}`,
-      expiresInMinutes: 10,
-    });
-  });
   routes.post("/sms/start", async (c) => {
     if (!deps.twilio)
       throw new DeliveryRefusedError(
@@ -475,9 +455,6 @@ export function configuredDeliveryProviders(
     // Slack and Teams share the OpenTag pairing: inbound turns, cards and proactive delivery.
     slack: opentag,
     teams: opentag,
-    telegram: env.TELEGRAM_BOT_TOKEN?.trim()
-      ? createTelegramTransport({ token: env.TELEGRAM_BOT_TOKEN.trim() })
-      : undefined,
     sms: smsValues
       ? createTwilioTransport({
           accountSid: smsValues[0] ?? "",

@@ -9,7 +9,6 @@ import {
 import { z } from "zod";
 import { currentApprovalContext } from "../approvals/types";
 import { type AuditStore, recordAuditEvent } from "../audit";
-import { StaleSnapshotError } from "./client";
 import type { ComputerSeat } from "./computer-key";
 import {
   type ActionActor,
@@ -125,26 +124,8 @@ export function createHeadlessComputerTools(options: {
       "computer_navigate",
       "Open a web page and return its title and readable text. Use the returned content to answer.",
       z.strictObject({ url: text }),
-      async ({ url }, { toolCallId, signal }) => {
-        const result = await gateway
-          .navigate(seat, actor, url, toolCallId)
-          .catch(async (error) => {
-            if (
-              !(error instanceof StaleSnapshotError) ||
-              !error.snapshotRequired
-            )
-              throw error;
-            signal.throwIfAborted();
-            // Supply the required observation now, rather than spending another model round asking
-            // for it. The model must see it and decide again; no navigation is replayed here.
-            return {
-              ok: false as const,
-              notPerformed: true as const,
-              reason: error.message,
-              snapshot: await gateway.snapshot(seat),
-            };
-          });
-        if ("notPerformed" in result) return result;
+      async ({ url }, { toolCallId }) => {
+        const result = await gateway.navigate(seat, actor, url, toolCallId);
         if (result.challenge)
           throw new HeadlessToolSuspension(result.challenge.reason, {
             kind: "computer_handoff",

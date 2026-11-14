@@ -41,8 +41,6 @@ for the right reason is more useful than a green one that checks nothing.
 
 ## Running
 
-Scenarios link their executable regressions in the existing server test layout. Eval 007 runs
-`server/src/openai-continuation.test.ts`; eval 010 runs `server/tests/delivery-store.integration.test.ts`
-and `server/tests/delivery-router.test.ts`; eval 011 runs `server/src/scheduling/` plus the real SDK
-continuation test. Database tests require the dedicated test database (see local development docs).
-Live checks record their source, IDs and evidence separately from fixtures in `scripts/baseline.md`.
+New scenarios must identify executable regressions and independent evidence against the current source.
+The former fork-specific scenarios were removed with their runtime extensions. Their historical
+results do not validate this upstream baseline. Keep run outputs in ignored .logs/.
